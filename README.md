@@ -47,7 +47,8 @@ Agrega la configuración a tu cliente MCP preferido (Claude Code, Cursor, etc.):
 ```
 
 ### Configuración Portátil vía `uvx` (Recomendado para instalaciones nuevas)
-Si deseas usar este MCP en clientes `stdio` (como Qwen Desktop, Claude o Cursor) sin instalar dependencias globales y descargando todo directamente al vuelo, puedes usar `uvx` de Astral. 
+
+Si deseas usar este MCP en clientes `stdio` (como Qwen Desktop, Claude o Cursor) sin instalar dependencias globales y descargando todo directamente al vuelo, puedes usar `uvx` de Astral.
 
 Para que esto funcione, debes definir la variable `LLM_WIKI_DIR` para indicarle al servidor efímero dónde guardar físicamente los archivos Markdown en tu computadora:
 
@@ -56,10 +57,7 @@ Para que esto funcione, debes definir la variable `LLM_WIKI_DIR` para indicarle 
   "mcpServers": {
     "llm-wiki-memory": {
       "command": "uvx",
-      "args": [
-        "--from", "/ruta/a/tu/clon/de/llm_wiki", 
-        "llm-wiki-mcp"
-      ],
+      "args": ["--from", "/ruta/a/tu/clon/de/llm_wiki", "llm-wiki-mcp"],
       "env": {
         "LLM_WIKI_DIR": "/Users/tu_usuario/Documentos/Mi_Wiki/wiki",
         "MCP_PROJECT_ID": "mi_proyecto_principal"
@@ -68,7 +66,8 @@ Para que esto funcione, debes definir la variable `LLM_WIKI_DIR` para indicarle 
   }
 }
 ```
-*(Nota: En lugar de una ruta local en `--from`, si el proyecto estuviera publicado, podrías usar directamente el nombre en PyPI u origen git).*
+
+_(Nota: En lugar de una ruta local en `--from`, si el proyecto estuviera publicado, podrías usar directamente el nombre en PyPI u origen git)._
 
 > **⚠️ Atención sobre los Embeddings:** Si decides cambiar el modelo vectorial (por ejemplo, a `mxbai-embed-large` de 1024 dimensiones), **DEBES borrar físicamente la base de datos** (`rm ~/.config/mcp-wiki/mcp-wiki.db`) antes de arrancar. `sqlite-vec` construye su esquema basándose en esa dimensión y arrojará un error si intentas mezclar vectores de distintos tamaños.
 
@@ -76,7 +75,7 @@ Para que esto funcione, debes definir la variable `LLM_WIKI_DIR` para indicarle 
 
 ## 🤖 Configuración para Agentes (Agent Skills)
 
-Para que cualquier modelo de lenguaje o agente IA (Cursor, Chatbots) entienda perfectamente los protocolos y flujos del servidor MCP sin intervención manual, debes indicarle que cree su propia habilidad o *Skill*.
+Para que cualquier modelo de lenguaje o agente IA (Cursor, Chatbots) entienda perfectamente los protocolos y flujos del servidor MCP sin intervención manual, debes indicarle que cree su propia habilidad o _Skill_.
 
 **Instrucción requerida para el agente:**
 
@@ -93,19 +92,22 @@ description: Instrucciones arquitectónicas sobre cómo guardar, procesar o busc
 Actúas en un entorno respaldado por un servidor MCP de memoria semántica. Tu responsabilidad es procesar información cruda y transformarla en notas altamente estructuradas. NO debes indexar vectores manualmente, el servidor MCP (`server.py`) hace esto automáticamente cuando usas las herramientas adecuadas.
 
 ## Escenario 1: Recibes un Archivo Crudo (PDF, Código, Doc) o un Link
+
 Si el usuario te proporciona un documento o te pide guardar un archivo externo en la base de conocimientos:
 
 1. **Persistencia Física:** Primero, usando tus herramientas de sistema de archivos, descarga o guarda el contenido original crudo dentro de un subdirectorio lógico en `sources/` (ej. `sources/papers/paper.pdf` o `sources/articles/blog.md`).
 2. **Síntesis Analítica:** Lee y extrae las ideas principales, conceptos y conclusiones del archivo.
-3. **Ingesta (save_note):** Utiliza la herramienta MCP `save_note` para guardar tu análisis en la carpeta `wiki/` (ej. `wiki/sources/summary-paper.md`). 
-   *DEBES* incluir un bloque YAML Frontmatter estricto en el contenido de la nota que apunte físicamente al archivo guardado en `sources/`.
+3. **Ingesta (save_note):** Utiliza la herramienta MCP `save_note` para guardar tu análisis en la carpeta `wiki/` (ej. `wiki/sources/summary-paper.md`).
+   _DEBES_ incluir un bloque YAML Frontmatter estricto en el contenido de la nota que apunte físicamente al archivo guardado en `sources/`.
+   **Pasa SIEMPRE la ruta absoluta** como `file_path` (ej. `/Users/.../wiki/sources/summary-paper.md`), nunca la relativa. El backend indexa por `file_path` literal y no normaliza, así que mezclar absolutas con relativas crea entradas duplicadas del mismo contenido.
 
-## Escenario 2: Reflexiones, Acuerdos de Diseño o Ideas Sueltas
+## Escenario 2: Reflexiones, OCR sobre imagenes, Acuerdos de Diseño o Ideas Sueltas
+
 Si el usuario te dice "recuerda esto", "guarda este bloque de código" o llegan a una conclusión arquitectónica conversando:
 
 1. **Síntesis:** Dale forma de concepto estructurado.
-2. **Ingesta Directa:** Llama a la herramienta `save_note` guardando el archivo en `wiki/concepts/` o `wiki/entities/`. 
-   Dado que no hay un archivo físico externo, puedes referenciar la conversación en `sources` o dejarlo vacío si aplica.
+2. **Ingesta Directa:** Llama a la herramienta `save_note` guardando el archivo en `wiki/concepts/` o `wiki/entities/`.
+   Dado que no hay un archivo físico externo, puedes referenciar el identificador de la conversación en el campo `sources` del YAML Frontmatter o dejarlo vacío si aplica. Aquí también: usa **ruta absoluta** en `file_path` para evitar duplicados.
 
 ## Especificaciones Estrictas del YAML Frontmatter
 CADA nota que envíes a `save_note` o guardes en `wiki/` DEBE comenzar con este bloque YAML (el linter fallará si falta):
@@ -135,25 +137,32 @@ Para consultar información pasada, SIEMPRE utiliza la herramienta MCP `search_w
 El sistema provee 3 vías diferentes para comprobar la integridad de tu base de conocimientos:
 
 ### 1. Vía Herramientas MCP (Agentes e IA)
+
 Los agentes pueden auto-diagnosticar la memoria usando las herramientas expuestas:
+
 - Llama a `get_ingestion_status(status=None)` para revisar notas que fallaron (ej. timeouts de Ollama) o fueron omitidas (`SKIPPED`).
 - Llama a `list_notes()` para asegurar qué archivos físicos están ya sincronizados en la base de datos.
 
 ### 2. Vía Logs del Servidor (Tracing)
+
 El servidor mantiene un log persistente de baja cardinalidad donde registra sincronizaciones perezosas, ingestas CLI y errores de infraestructura. Puedes revisarlo en tiempo real:
+
 ```bash
 tail -f ~/.config/mcp-wiki/mcp-wiki.log
 ```
 
 ### 3. Vía Base de Datos Cruda (SQLite de Bajo Nivel)
-Dado que persistimos usando SQLite tradicional sin ofuscaciones, puedes auditar el archivo `.db` de forma nativa. 
+
+Dado que persistimos usando SQLite tradicional sin ofuscaciones, puedes auditar el archivo `.db` de forma nativa.
 
 **Comprobar corrupción estructural nativa:**
+
 ```bash
 sqlite3 ~/.config/mcp-wiki/mcp-wiki.db "PRAGMA integrity_check;"
 ```
 
 **Ver conteo de fragmentos y vectores procesados:**
+
 ```bash
 sqlite3 ~/.config/mcp-wiki/mcp-wiki.db "SELECT count(*) AS Notas FROM notes; SELECT count(*) AS Fragmentos FROM vec_chunks;"
 ```
