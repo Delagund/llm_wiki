@@ -1,0 +1,41 @@
+# ---------------------------------------------------
+# 1. ARCHIVOS Y DATOS PRIVADOS (LLM-Wiki)
+# ---------------------------------------------------
+# Ignorar el contenido personal pero mantener las carpetas raíz activas
+wiki/*
+!wiki/.gitkeep
+
+sources/*
+!sources/.gitkeep
+
+# ---------------------------------------------------
+# 2. ENTORNO DE DESARROLLO LOCAL Y ANTECEDENTES
+# ---------------------------------------------------
+.agents/
+.claude/
+.obsidian/
+data_only/.obsidian/
+data_only/mcp_viability_report.md
+data_only/mcp_viability_report2.md
+data_only/implementation_plan.md
+data_only/evaluation.xml
+
+# ---------------------------------------------------
+# 3. PYTHON Y COMPILACIÓN
+# ---------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+
+# ---------------------------------------------------
+# 4. SISTEMA OPERATIVO
+# ---------------------------------------------------
+.DS_Store
+Thumbs.db

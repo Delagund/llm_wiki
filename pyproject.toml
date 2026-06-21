@@ -1,0 +1,23 @@
+[project]
+name = "llm-wiki-mcp"
+version = "0.1.0"
+description = "Servidor MCP de Memoria Semántica"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=3.4.2",
+    "sqlite-vec>=0.1.9",
+    "requests>=2.34.2",
+    "pyyaml>=6.0.3"
+]
+
+[project.scripts]
+llm-wiki-mcp = "server:main_run"
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["server", "database", "ollama_integration"]
+packages = ["utils"]
