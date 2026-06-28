@@ -7,6 +7,9 @@ wiki/*
 
 sources/*
 !sources/.gitkeep
+CLAUDE.md
+Gemini.md
+uv.lock
 
 # ---------------------------------------------------
 # 2. ENTORNO DE DESARROLLO LOCAL Y ANTECEDENTES
