@@ -8,7 +8,7 @@ import struct
 import time
 import threading
 from database import init_db, create_schema
-from ollama_integration import get_ollama_embedding, OllamaTimeout
+from ollama_integration import get_ollama_embedding, OllamaTimeout, check_ollama_availability
 from utils.chunking_strategy import chunk_text
 from utils.logger import logger
 
@@ -105,6 +105,9 @@ def save_note(file_path: str, content: str) -> dict:
             logger.info({
                 "action": "profiling",
                 "file": file_path,
+                "project_id": project_id,
+                "is_global": is_global,
+                "char_count": len(content),
                 "chunks": len(chunks),
                 "parse_ms": round((t1 - t0) * 1000, 2),
                 "chunking_ms": round((t2 - t1) * 1000, 2),
@@ -129,55 +132,110 @@ def save_note(file_path: str, content: str) -> dict:
             return {"status": "FAILED", "message": f"Error: {str(e)}"}
 
 
+def sanitize_fts_query(query: str) -> str:
+    """
+    Sanitiza la query de FTS5 eliminando caracteres especiales que puedan
+    romper la sintaxis de SQLite FTS (manteniendo alfanuméricos, espacios, guiones y guiones bajos).
+    Explicación: Esto previene excepciones operacionales si la consulta contiene comillas impares o comodines mal ubicados.
+    """
+    if not query:
+        return ""
+    cleaned = "".join(c for c in query if c.isalnum() or c.isspace() or c in ("-", "_"))
+    return " ".join(cleaned.split())
+
+
 @mcp.tool()
 def search_wiki(query: str, current_project: str = None, limit: int = 5) -> str:
     """
-    Busca contexto usando búsqueda semántica híbrida (KNN Vec0) con fallback a FTS5 léxico.
-    Filtra por project_id o contenido is_global=1.
+    Busca contexto usando búsqueda semántica híbrida (KNN Vec0 + FTS5) fusionada mediante RRF.
+    Explicación: Si Ollama está disponible, ejecuta tanto búsqueda semántica como léxica,
+    filtrando por proyecto y fusionando resultados usando Reciprocal Rank Fusion (RRF).
+    Si Ollama no está disponible o falla, degrada a búsqueda léxica únicamente.
     """
     t0 = time.perf_counter()
     if not current_project:
         current_project = os.getenv("MCP_PROJECT_ID", hashlib.md5(os.getcwd().encode()).hexdigest()[:8])
 
-    try:
-        query_vector = get_ollama_embedding(query)
-        use_vector = True
-    except Exception:
-        use_vector = False
+    use_vector = False
+    query_vector = None
+
+    # Explicación: Se chequea la disponibilidad de Ollama una única vez para evitar timeouts repetitivos
+    if check_ollama_availability():
+        try:
+            # Explicación: Timeout ajustado a 2s para búsquedas interactivas ágiles
+            query_vector = get_ollama_embedding(query, timeout=2.0)
+            use_vector = True
+        except Exception:
+            use_vector = False
 
     t1 = time.perf_counter()
+    
     with init_db(DB_PATH) as conn:
         cursor = conn.cursor()
         
-        if use_vector:
+        rrf_scores = {}
+        chunks_metadata = {}
+        vector_results = []
+        fts_results = []
+
+        # 1. Recuperación Semántica (KNN)
+        if use_vector and query_vector:
+            # Explicación: Buscamos un k mayor (50) globalmente para evitar descartar coincidencias de proyecto antes del filtro
             cursor.execute("""
-                SELECT c.content, n.title, n.is_global, v.distance
+                SELECT c.content, n.title, n.is_global, v.distance, c.id
                 FROM vec_chunks v
                 JOIN document_chunks c ON v.chunk_id = c.id
                 JOIN notes n ON c.note_id = n.id
                 WHERE v.embedding MATCH ?
                   AND (n.project_id = ? OR n.is_global = 1)
-                  AND v.k = ?
+                  AND v.k = 50
                 ORDER BY v.distance ASC
-            """, (serialize_f32(query_vector), current_project, limit))
-        else:
+            """, (serialize_f32(query_vector), current_project))
+            vector_results = cursor.fetchall()
+            
+            for rank, row in enumerate(vector_results):
+                chunk_id = row[4]
+                # row: (content, title, is_global, distance, id)
+                rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + (1.0 / (60.0 + rank + 1))
+                chunks_metadata[chunk_id] = (row[0], row[1], row[2], f"Distancia: {row[3]:.4f}")
+
+        # 2. Recuperación Léxica (FTS5)
+        sanitized = sanitize_fts_query(query)
+        if sanitized:
             cursor.execute("""
-                SELECT c.content, n.title, n.is_global, 1.0 AS distance
+                SELECT c.content, n.title, n.is_global, c.id
                 FROM fts_chunks f
                 JOIN document_chunks c ON f.chunk_id = c.id
                 JOIN notes n ON c.note_id = n.id
                 WHERE fts_chunks MATCH ?
                   AND (n.project_id = ? OR n.is_global = 1)
-                LIMIT ?
-            """, (query, current_project, limit))
+                LIMIT 50
+            """, (sanitized, current_project))
+            fts_results = cursor.fetchall()
             
-        results = cursor.fetchall()
+            for rank, row in enumerate(fts_results):
+                chunk_id = row[3]
+                # row: (content, title, is_global, id)
+                rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + (1.0 / (60.0 + rank + 1))
+                if chunk_id not in chunks_metadata:
+                    chunks_metadata[chunk_id] = (row[0], row[1], row[2], "Fallback FTS5")
+
+        # Explicación: Consolidamos y ordenamos los fragmentos fusionando ambos rankings
+        sorted_chunks = sorted(rrf_scores.keys(), key=lambda cid: rrf_scores[cid], reverse=True)[:limit]
+        results = [chunks_metadata[cid] for cid in sorted_chunks]
+        
         t2 = time.perf_counter()
         
         logger.info({
             "action": "profiling",
             "search_query": query,
-            "fallback": not use_vector,
+            "sanitized_query": sanitized,
+            "project_id": current_project,
+            "limit": limit,
+            "hybrid": use_vector,
+            "vector_candidates": len(vector_results),
+            "fts5_candidates": len(fts_results),
+            "results_returned": len(results),
             "embedding_ms": round((t1 - t0) * 1000, 2),
             "db_search_ms": round((t2 - t1) * 1000, 2),
             "total_ms": round((t2 - t0) * 1000, 2)
@@ -189,8 +247,7 @@ def search_wiki(query: str, current_project: str = None, limit: int = 5) -> str:
         output = []
         for row in results:
             scope_tag = "[GLOBAL]" if row[2] == 1 else f"[{current_project}]"
-            meta_dist = f" (Distancia: {row[3]:.4f})" if use_vector else " (Fallback FTS5)"
-            output.append(f"### {scope_tag} Nota: {row[1]}{meta_dist}\n{row[0]}\n---")
+            output.append(f"### {scope_tag} Nota: {row[1]} ({row[3]})\n{row[0]}\n---")
 
         return "\n".join(output)
 
@@ -273,11 +330,35 @@ def startup_lazy_check():
 
 def main_run():
     """Punto de entrada para el script de consola llm-wiki-mcp."""
-    with init_db(DB_PATH) as conn:
-        create_schema(conn)
+    t0 = time.perf_counter()
+    logger.info({
+        "db_path": DB_PATH,
+        "mcp_server": mcp.name,
+        "event": "startup_init"
+    }, "Iniciando servidor MCP y conectando base de datos...")
+    
+    try:
+        with init_db(DB_PATH) as conn:
+            create_schema(conn)
+            logger.info({
+                "db_path": DB_PATH,
+                "status": "connected",
+                "journal_mode": "WAL",
+                "sqlite_vec_version": "loaded"
+            }, "Base de datos inicializada y esquemas listos")
+    except Exception as e:
+        logger.error({"error": str(e)}, "Error al inicializar la base de datos")
+        raise
         
     # Ejecutamos la validación lazy en segundo plano para no bloquear el 'initialize' del cliente MCP
     threading.Thread(target=startup_lazy_check, daemon=True).start()
+    
+    t1 = time.perf_counter()
+    logger.info({
+        "startup_ms": round((t1 - t0) * 1000, 2),
+        "mcp_server": mcp.name,
+        "status": "running"
+    }, "Servidor MCP iniciado y listo para recibir peticiones")
     
     mcp.run()
 
