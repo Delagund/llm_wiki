@@ -28,6 +28,9 @@ El proyecto está diseñado para funcionar como un ejecutable global del sistema
 pip install -e .
 ```
 
+- Asegurarse que ollama esté corriendo o ejecutar "ollama serve" en terminal para iniciar el servidor.
+- Si no está corriendo o no está cargado, ejecutar "ollama pull nomic-embed-text" para descargar el modelo.
+
 Agrega la configuración a tu cliente MCP preferido (Claude Code, Cursor, etc.):
 
 ```json
