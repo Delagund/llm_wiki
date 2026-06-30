@@ -17,11 +17,8 @@ uv.lock
 .agents/
 .claude/
 .obsidian/
-data_only/.obsidian/
-data_only/mcp_viability_report.md
-data_only/mcp_viability_report2.md
-data_only/implementation_plan.md
-data_only/evaluation.xml
+data_only/
+
 
 # ---------------------------------------------------
 # 3. PYTHON Y COMPILACIÓN
