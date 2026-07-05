@@ -7,16 +7,84 @@ import uuid
 import struct
 import time
 import threading
+from dataclasses import dataclass
 from database import init_db, create_schema
 from ollama_integration import get_ollama_embedding, OllamaTimeout, check_ollama_availability
 from utils.chunking_strategy import chunk_text
 from utils.logger import logger
 
-DB_DIR = os.path.expanduser("~/.config/mcp-wiki")
-os.makedirs(DB_DIR, exist_ok=True)
-DB_PATH = os.path.join(DB_DIR, "central_memory.db")
 
-mcp = FastMCP("llm-wiki-central-memory")
+@dataclass
+class ProjectConfig:
+    """Configuración dinámica del proyecto. Resuelve rutas en runtime."""
+    wiki_dir: str
+    sources_dir: str
+    db_path: str
+    initialized: bool = True
+
+# Configuración activa compartida por las herramientas MCP en runtime
+active_config: ProjectConfig | None = None
+
+mcp = FastMCP("llm-wiki-mcp")
+
+
+def load_config() -> ProjectConfig | None:
+    """
+    Carga la configuración del proyecto con prioridad:
+    1. Variable de entorno LLM_WIKI_DIR
+    2. Archivo .llm_wiki_config.json en el directorio de ejecución
+    Si ninguno existe, retorna None (servidor no inicializado).
+    """
+    env_dir = os.environ.get("LLM_WIKI_DIR")
+    if env_dir:
+        base_path = os.path.abspath(env_dir)
+        return ProjectConfig(
+            wiki_dir=os.path.join(base_path, "wiki"),
+            sources_dir=os.path.join(base_path, "sources"),
+            db_path=os.path.join(base_path, "wiki.db")
+        )
+
+    config_path = os.path.join(os.getcwd(), ".llm_wiki_config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = json.load(f)
+            return ProjectConfig(
+                wiki_dir=config_data["wiki_dir"],
+                sources_dir=config_data["sources_dir"],
+                db_path=os.path.join(os.path.dirname(config_data["wiki_dir"]), "wiki.db")
+            )
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error({"error": str(e), "config_path": config_path}, "Error al leer configuracion local")
+
+    return None
+
+
+def validate_path_sandbox(file_path: str, allowed_base: str) -> str:
+    """
+    Valida que la ruta resuelta esté dentro del directorio base permitido.
+    Previene ataques de Path Traversal usando os.path.abspath.
+    """
+    resolved = os.path.abspath(file_path)
+    base = os.path.abspath(allowed_base)
+    if not resolved.startswith(base + os.sep) and resolved != base:
+        raise ValueError(
+            f"Acceso denegado: la ruta '{file_path}' esta fuera del sandbox '{allowed_base}'"
+        )
+    return resolved
+
+
+def require_initialized() -> ProjectConfig:
+    """
+    Guard que verifica que el servidor esté inicializado.
+    Lanza ValueError si active_config es None.
+    """
+    if active_config is None:
+        raise ValueError(
+            "Servidor no inicializado. Use initialize_project(base_path) para configurar."
+        )
+    return active_config
+
 
 def parse_frontmatter(content: str) -> tuple[dict, str]:
     if content.startswith("---"):
@@ -29,9 +97,24 @@ def parse_frontmatter(content: str) -> tuple[dict, str]:
                 pass
     return {}, content.strip()
 
-def determine_scope(file_path: str, yaml_metadata: dict) -> tuple[str, int]:
-    parts = file_path.split(os.sep)
-    project_id = parts[-2] if len(parts) > 1 else "default"
+def determine_scope(file_path: str, yaml_metadata: dict, wiki_dir: str = None) -> tuple[str, int]:
+    """
+    Determina el project_id y visibilidad global de una nota.
+    El project_id se extrae como el primer subdirectorio relativo a wiki_dir.
+    """
+    project_id = "default"
+    if wiki_dir:
+        try:
+            rel_path = os.path.relpath(file_path, wiki_dir)
+            parts = rel_path.split(os.sep)
+            if len(parts) > 1 and parts[0] != '..':
+                project_id = parts[0]
+        except ValueError:
+            pass
+    else:
+        parts = file_path.split(os.sep)
+        project_id = parts[-2] if len(parts) > 1 else "default"
+
     is_global = 1 if yaml_metadata.get("scope") == "global" or "global" in file_path.lower() else 0
     return project_id, is_global
 
@@ -40,15 +123,76 @@ def serialize_f32(vector: list[float]) -> bytes:
 
 
 @mcp.tool()
+def initialize_project(base_path: str) -> dict:
+    """
+    Inicializa un proyecto LLM-Wiki: crea estructura de carpetas, base de datos y configuracion.
+    Es la unica herramienta que funciona sin que el servidor este previamente inicializado.
+    """
+    global active_config
+
+    base_path = os.path.abspath(base_path)
+
+    # Seguridad: no permitir inicializar en la raiz del sistema (excepto en modo test)
+    is_test_mode = os.environ.get("LLM_WIKI_TEST_MODE") == "true"
+    if not is_test_mode and base_path == os.sep:
+        raise ValueError("No se permite inicializar en la raiz del sistema de archivos")
+
+    # Crear estructura de directorios
+    dirs_to_create = [
+        os.path.join(base_path, "wiki", "concepts"),
+        os.path.join(base_path, "wiki", "entities"),
+        os.path.join(base_path, "wiki", "sources"),
+        os.path.join(base_path, "wiki", "comparisons"),
+        os.path.join(base_path, "sources"),
+    ]
+    for d in dirs_to_create:
+        os.makedirs(d, exist_ok=True)
+
+    # Crear base de datos con esquema
+    db_path = os.path.join(base_path, "wiki.db")
+    with init_db(db_path) as conn:
+        create_schema(conn)
+
+    # Escribir configuracion local
+    config_data = {
+        "wiki_dir": os.path.join(base_path, "wiki"),
+        "sources_dir": os.path.join(base_path, "sources")
+    }
+    config_path = os.path.join(base_path, ".llm_wiki_config.json")
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config_data, f, indent=2)
+
+    # Activar configuracion en runtime sin necesidad de reiniciar
+    active_config = ProjectConfig(
+        wiki_dir=config_data["wiki_dir"],
+        sources_dir=config_data["sources_dir"],
+        db_path=db_path
+    )
+
+    logger.info({"base_path": base_path, "db_path": db_path}, "Proyecto inicializado exitosamente")
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Proyecto inicializado en {base_path}",
+        "wiki_dir": config_data["wiki_dir"],
+        "sources_dir": config_data["sources_dir"],
+        "db_path": db_path
+    }
+
+
+@mcp.tool()
 def save_note(file_path: str, content: str) -> dict:
     """
     Ingesta una nota con embeddings. Extrae metadata YAML, asigna project_id e is_global,
     segmenta el texto, genera embeddings (con timeout) y persiste atómicamente.
     """
+    config = require_initialized()
+    file_path = validate_path_sandbox(file_path, config.wiki_dir)
+
     t0 = time.perf_counter()
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     
-    with init_db(DB_PATH) as conn:
+    with init_db(config.db_path) as conn:
         cursor = conn.cursor()
         
         cursor.execute("SELECT content_hash FROM notes WHERE file_path = ?", (file_path,))
@@ -57,7 +201,7 @@ def save_note(file_path: str, content: str) -> dict:
             return {"status": "SKIPPED", "message": "Content hash matches existing note. Skipped."}
             
         yaml_meta, plain_text = parse_frontmatter(content)
-        project_id, is_global = determine_scope(file_path, yaml_meta)
+        project_id, is_global = determine_scope(file_path, yaml_meta, config.wiki_dir)
         note_id = str(uuid.uuid4())
         
         try:
@@ -153,6 +297,8 @@ def search_wiki(query: str, current_project: str = None, limit: int = 5) -> str:
     Si Ollama no está disponible o falla, degrada a búsqueda léxica únicamente.
     """
     t0 = time.perf_counter()
+    config = require_initialized()
+
     if not current_project:
         current_project = os.getenv("MCP_PROJECT_ID", hashlib.md5(os.getcwd().encode()).hexdigest()[:8])
 
@@ -170,7 +316,7 @@ def search_wiki(query: str, current_project: str = None, limit: int = 5) -> str:
 
     t1 = time.perf_counter()
     
-    with init_db(DB_PATH) as conn:
+    with init_db(config.db_path) as conn:
         cursor = conn.cursor()
         
         rrf_scores = {}
@@ -258,7 +404,9 @@ def get_ingestion_status(status: str = None) -> list[dict]:
     Reporta notas que hayan fallado o hayan sido omitidas (SKIPPED).
     Opcionalmente filtra por status.
     """
-    with init_db(DB_PATH) as conn:
+    config = require_initialized()
+
+    with init_db(config.db_path) as conn:
         cursor = conn.cursor()
         if status:
             cursor.execute("SELECT note_id, status, error_message, timestamp FROM ingestion_logs WHERE status = ?", (status,))
@@ -272,7 +420,9 @@ def list_notes(project_id: str = None, is_global: bool = None) -> list[dict]:
     """
     Lista las notas almacenadas, con filtros opcionales.
     """
-    with init_db(DB_PATH) as conn:
+    config = require_initialized()
+
+    with init_db(config.db_path) as conn:
         cursor = conn.cursor()
         
         query = "SELECT file_path, title, project_id, is_global, updated_at FROM notes WHERE 1=1"
@@ -289,28 +439,35 @@ def list_notes(project_id: str = None, is_global: bool = None) -> list[dict]:
 
 def startup_lazy_check():
     """
-    Sincronización Extraordinaria: Escanea el directorio wiki/
-    y actualiza los archivos que hayan sido modificados desde la última indexación.
+    Sincronizacion en frio: escanea wiki/ y actualiza archivos modificados.
     """
-    default_wiki_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wiki")
-    wiki_dir = os.environ.get("LLM_WIKI_DIR", default_wiki_dir)
+    if active_config is None:
+        return
+
+    wiki_dir = active_config.wiki_dir
     if not os.path.exists(wiki_dir):
         return
 
-    with init_db(DB_PATH) as conn:
+    with init_db(active_config.db_path) as conn:
         cursor = conn.cursor()
-        
+
         for root, _, files in os.walk(wiki_dir):
             for file in files:
                 if file.endswith(".md"):
                     file_path = os.path.join(root, file)
-                    
-                    # Verificar la última modificación en DB
+
+                    # Validar que el archivo esta dentro del sandbox
+                    try:
+                        validate_path_sandbox(file_path, wiki_dir)
+                    except ValueError:
+                        logger.warning({"file": file_path}, "Archivo fuera del sandbox, omitido")
+                        continue
+
                     cursor.execute("SELECT strftime('%s', updated_at) FROM notes WHERE file_path = ?", (file_path,))
                     row = cursor.fetchone()
-                    
+
                     mtime = os.path.getmtime(file_path)
-                    
+
                     needs_update = False
                     if row is None:
                         needs_update = True
@@ -318,7 +475,7 @@ def startup_lazy_check():
                         db_epoch = float(row[0]) if row[0] else 0
                         if mtime > db_epoch:
                             needs_update = True
-                            
+
                     if needs_update:
                         try:
                             with open(file_path, "r", encoding="utf-8") as f:
@@ -330,52 +487,72 @@ def startup_lazy_check():
 
 def main_run():
     """Punto de entrada para el script de consola llm-wiki-mcp."""
+    global active_config
     t0 = time.perf_counter()
-    logger.info({
-        "db_path": DB_PATH,
-        "mcp_server": mcp.name,
-        "event": "startup_init"
-    }, "Iniciando servidor MCP y conectando base de datos...")
-    
-    try:
-        with init_db(DB_PATH) as conn:
-            create_schema(conn)
-            logger.info({
-                "db_path": DB_PATH,
-                "status": "connected",
-                "journal_mode": "WAL",
-                "sqlite_vec_version": "loaded"
-            }, "Base de datos inicializada y esquemas listos")
-    except Exception as e:
-        logger.error({"error": str(e)}, "Error al inicializar la base de datos")
-        raise
-        
-    # Ejecutamos la validación lazy en segundo plano para no bloquear el 'initialize' del cliente MCP
-    threading.Thread(target=startup_lazy_check, daemon=True).start()
-    
+
+    # Cargar configuracion con prioridad: env > JSON > None
+    active_config = load_config()
+
+    if active_config:
+        logger.info({
+            "db_path": active_config.db_path,
+            "wiki_dir": active_config.wiki_dir,
+            "mcp_server": mcp.name,
+            "event": "startup_init"
+        }, "Iniciando servidor MCP con configuracion activa")
+
+        try:
+            with init_db(active_config.db_path) as conn:
+                create_schema(conn)
+                logger.info({
+                    "db_path": active_config.db_path,
+                    "status": "connected"
+                }, "Base de datos inicializada y esquemas listos")
+        except Exception as e:
+            logger.error({"error": str(e)}, "Error al inicializar la base de datos")
+            raise
+
+        # Sincronizacion lazy en segundo plano para no bloquear el arranque
+        threading.Thread(target=startup_lazy_check, daemon=True).start()
+    else:
+        logger.info({
+            "mcp_server": mcp.name,
+            "event": "startup_uninit"
+        }, "Servidor MCP iniciado sin configuracion. Use initialize_project para configurar.")
+
     t1 = time.perf_counter()
     logger.info({
         "startup_ms": round((t1 - t0) * 1000, 2),
         "mcp_server": mcp.name,
         "status": "running"
-    }, "Servidor MCP iniciado y listo para recibir peticiones")
-    
+    }, "Servidor MCP listo para recibir peticiones")
+
     mcp.run()
 
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "--ingest":
+        # Cargar configuracion para CLI
+        active_config = load_config()
+        if active_config is None:
+            print("Error: Servidor no inicializado. Configure LLM_WIKI_DIR o ejecute initialize_project.")
+            sys.exit(1)
+
         for file_path in sys.argv[2:]:
-            if os.path.exists(file_path):
+            abs_path = os.path.abspath(file_path)
+            if os.path.exists(abs_path):
                 try:
-                    with open(file_path, "r", encoding="utf-8") as f:
+                    validate_path_sandbox(abs_path, active_config.wiki_dir)
+                    with open(abs_path, "r", encoding="utf-8") as f:
                         content = f.read()
-                    logger.info({"file": file_path}, "Manual CLI ingestion triggered")
-                    print(f"Ingesting {file_path}...")
-                    print(save_note(file_path, content))
+                    logger.info({"file": abs_path}, "Manual CLI ingestion triggered")
+                    print(f"Ingesting {abs_path}...")
+                    print(save_note(abs_path, content))
+                except ValueError as e:
+                    print(f"Security error: {e}")
                 except Exception as e:
-                    logger.error({"file": file_path, "error": str(e)}, "Manual ingestion failed")
-                    print(f"Failed to ingest {file_path}: {e}")
+                    logger.error({"file": abs_path, "error": str(e)}, "Manual ingestion failed")
+                    print(f"Failed to ingest {abs_path}: {e}")
             else:
                 logger.error({"file": file_path}, "File not found for CLI ingest")
                 print(f"File not found: {file_path}")
