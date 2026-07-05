@@ -112,3 +112,27 @@ def chunk_text(text: str, max_chars: int = 2000, overlap_chars: int = 200) -> li
         chunks.append(restore_code_blocks(current_chunk_text.strip()))
 
     return chunks
+
+
+def strip_markdown(text: str) -> str:
+    # 1. Code blocks (triple backtick)
+    text = re.sub(r'```(?:\w+)?\n(.*?)\n```', r'\1', text, flags=re.DOTALL)
+    # 2. Inline code (single backtick)
+    text = re.sub(r'`{1,3}(.+?)`{1,3}', r'\1', text)
+    # 3. Headers
+    text = re.sub(r'(?m)^#{1,6}\s+', '', text)
+    # 4. Bold and Italic (asterisks only, NOT underscores)
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    # 5. Links
+    text = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', text)
+    # 6. Blockquotes
+    text = re.sub(r'(?m)^\s*>\s+', '', text)
+    # 7. List markers
+    text = re.sub(r'(?m)^\s*[-*+]\s+', '', text)
+    text = re.sub(r'(?m)^\s*\d+\.\s+', '', text)
+    # 8. Strikethrough
+    text = re.sub(r'~~(.+?)~~', r'\1', text)
+    # 9. Horizontal rules
+    text = re.sub(r'(?m)^[-*_]{3,}\s*$', '', text)
+    return text.strip()

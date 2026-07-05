@@ -10,7 +10,7 @@ import threading
 from dataclasses import dataclass
 from database import init_db, create_schema, VEC_AVAILABLE, DB_LOCK, ensure_schema
 from ollama_integration import get_ollama_embedding, OllamaTimeout, check_ollama_availability
-from utils.chunking_strategy import chunk_text, segment_html
+from utils.chunking_strategy import chunk_text, segment_html, strip_markdown
 from utils.logger import logger
 import re
 from html.parser import HTMLParser
@@ -26,6 +26,23 @@ class StyleValidator(HTMLParser):
         for attr, _ in attrs:
             if attr in ('style', 'class'):
                 self.has_style = True
+
+
+class RelationExtractor(HTMLParser):
+    VALID_RELS = {"dependency", "concept-link", "source-summary", "comparison"}
+
+    def __init__(self):
+        super().__init__()
+        self.relations: list[tuple[str, str, str]] = []  # (href, rel)
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "a":
+            return
+        attrs_dict = dict(attrs)
+        href = attrs_dict.get("href", "").strip()
+        rel = attrs_dict.get("rel", "").strip().lower()
+        if href and rel in self.VALID_RELS:
+            self.relations.append((href, rel))
 
 
 @dataclass
@@ -249,6 +266,10 @@ def save_note(file_path: str, content: str) -> dict:
             ext = ext.lower()
             
             yaml_meta, plain_text = parse_note_content(content, ext)
+
+            # Strip markdown syntax for cleaner indexing (only affects chunking, not file on disk)
+            if ext == '.md':
+                plain_text = strip_markdown(plain_text)
             
             if ext == '.md':
                 required = ["title", "type", "sources", "related", "created", "updated"]
@@ -312,6 +333,16 @@ def save_note(file_path: str, content: str) -> dict:
                         "INSERT INTO fts_chunks (chunk_id, content) VALUES (?, ?)",
                         (chunk_id, chunk)
                     )
+                    
+                # Extract graph relations from HTML content
+                if ext == '.html':
+                    extractor = RelationExtractor()
+                    extractor.feed(content)
+                    for href, rel in extractor.relations:
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO note_relations (source_note_id, target_file_path, relation_type) VALUES (?, ?, ?)",
+                            (note_id, href, rel)
+                        )
                     
                 t3 = time.perf_counter()
                 cursor.execute("INSERT INTO ingestion_logs (note_id, status) VALUES (?, ?)", (file_path, "SUCCESS"))
@@ -525,7 +556,7 @@ def startup_lazy_check():
 
         for root, _, files in os.walk(wiki_dir):
             for file in files:
-                if file.endswith(".md"):
+                if file.endswith((".md", ".html")):
                     file_path = os.path.join(root, file)
 
                     # Validar que el archivo esta dentro del sandbox
@@ -556,6 +587,34 @@ def startup_lazy_check():
                             logger.info({"file": file_path}, "Lazy sync completed")
                         except Exception as e:
                             logger.error({"file": file_path, "error": str(e)}, "Lazy sync failed")
+
+
+    # T4.4: Ingesta de sources/ — autogenerar resúmenes para archivos crudos
+    sources_dir = active_config.sources_dir
+    wiki_sources_dir = os.path.join(active_config.wiki_dir, "sources")
+    if sources_dir and os.path.exists(sources_dir):
+        os.makedirs(wiki_sources_dir, exist_ok=True)
+        for entry in os.listdir(sources_dir):
+            src_path = os.path.join(sources_dir, entry)
+            if not os.path.isfile(src_path):
+                continue
+            base_name, _ = os.path.splitext(entry)
+            target_path = os.path.join(wiki_sources_dir, f"{base_name}.html")
+            if os.path.exists(target_path):
+                continue
+            try:
+                with open(src_path, "r", encoding="utf-8") as f:
+                    raw_content = f.read()
+            except UnicodeDecodeError:
+                logger.warning({"file": entry}, "Source file no es UTF-8, omitido")
+                continue
+            html_content = f"<!--yaml\ntype: source-summary\nis_global: true\nsources: [\"sources/{entry}\"]\ntitle: {base_name}\n-->\n<article>\n{raw_content}\n</article>"
+            try:
+                save_note(target_path, html_content)
+                logger.info({"file": target_path, "source": entry}, "Source auto-ingested")
+            except Exception as e:
+                logger.error({"file": target_path, "error": str(e)}, "Source ingestion failed")
+
 
 def main_run():
     """Punto de entrada para el script de consola llm-wiki-mcp."""
