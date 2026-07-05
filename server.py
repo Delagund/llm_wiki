@@ -96,7 +96,27 @@ def validate_path_sandbox(file_path: str, allowed_base: str) -> str:
     Valida que la ruta resuelta esté dentro del directorio base permitido.
     Previene ataques de Path Traversal usando os.path.abspath.
     """
-    resolved = os.path.abspath(file_path)
+    # Determinamos si la ruta proporcionada es relativa para aplicar las reglas de resolución.
+    # Esto es necesario para dar flexibilidad al cliente al pasar rutas como 'wiki/archivo.md' o 'archivo.md'.
+    if not os.path.isabs(file_path):
+        normalized = os.path.normpath(file_path)
+        parts = normalized.split(os.sep)
+        first_component = parts[0] if parts else ""
+        
+        allowed_base_normalized = os.path.normpath(allowed_base)
+        allowed_base_name = os.path.basename(allowed_base_normalized)
+        
+        # Si el primer componente coincide con el nombre del directorio base, se asume que
+        # la ruta relativa parte desde el directorio padre del base (raíz del proyecto).
+        # Esto evita resolver rutas erróneas como '/ruta/al/proyecto/wiki/wiki/archivo.md'.
+        if first_component == allowed_base_name:
+            parent_base = os.path.dirname(allowed_base_normalized)
+            resolved = os.path.abspath(os.path.join(parent_base, normalized))
+        else:
+            resolved = os.path.abspath(os.path.join(allowed_base, normalized))
+    else:
+        resolved = os.path.abspath(file_path)
+
     base = os.path.abspath(allowed_base)
     if not resolved.startswith(base + os.sep) and resolved != base:
         raise ValueError(

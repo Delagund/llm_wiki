@@ -95,25 +95,38 @@ def test_config_priority(monkeypatch, tmp_path):
 
 
 def test_sandbox_path_traversal():
-    """Verifica que el sandbox rechaza rutas fuera del directorio permitido."""
+    """Verifica que el sandbox rechaza rutas fuera del directorio permitido y maneja relativas."""
     from server import validate_path_sandbox
     import tempfile
 
     with tempfile.TemporaryDirectory() as base:
-        # Ruta válida dentro del sandbox
-        valid_path = os.path.join(base, "wiki", "notes", "note.md")
-        result = validate_path_sandbox(valid_path, base)
-        assert result.startswith(base)
+        allowed_base = os.path.join(base, "wiki")
+        os.makedirs(allowed_base, exist_ok=True)
 
-        # Path Traversal con ..
-        traversal_path = os.path.join(base, "..", "etc", "passwd")
+        # 1. Rutas válidas relativas que contengan el directorio del sandbox (ej. 'wiki/notes/note.md')
+        path_with_sandbox_dir = "wiki/notes/note.md"
+        result_with_dir = validate_path_sandbox(path_with_sandbox_dir, allowed_base)
+        assert result_with_dir == os.path.abspath(os.path.join(allowed_base, "notes", "note.md"))
+
+        # 2. Rutas válidas relativas puras (ej. 'notes/note.md')
+        pure_relative_path = "notes/note.md"
+        result_pure = validate_path_sandbox(pure_relative_path, allowed_base)
+        assert result_pure == os.path.abspath(os.path.join(allowed_base, "notes", "note.md"))
+
+        # 3. Que sigan rechazándose los path traversals relativos (ej. '../etc/passwd')
+        traversal_path = os.path.join("..", "etc", "passwd")
         with pytest.raises(ValueError, match="fuera del sandbox"):
-            validate_path_sandbox(traversal_path, base)
+            validate_path_sandbox(traversal_path, allowed_base)
+
+        # Ruta válida absoluta
+        valid_absolute = os.path.join(allowed_base, "notes", "note.md")
+        result_abs = validate_path_sandbox(valid_absolute, allowed_base)
+        assert result_abs == os.path.abspath(valid_absolute)
 
         # Ruta completamente externa
         external_path = "/tmp/malicious/file.txt"
         with pytest.raises(ValueError, match="fuera del sandbox"):
-            validate_path_sandbox(external_path, base)
+            validate_path_sandbox(external_path, allowed_base)
 
 
 def test_uninitialized_state(monkeypatch):
