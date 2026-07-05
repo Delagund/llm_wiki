@@ -56,47 +56,111 @@ El proyecto ha completado de forma exitosa sus **7 Fases del Plan de Trabajo Esc
 
 ## 🛠 Instalación y Configuración
 
-El proyecto está diseñado para funcionar como un ejecutable global del sistema a través de `pyproject.toml`.
+El proyecto está diseñado para funcionar como un servidor MCP de memoria semántica. Para simplificar su registro y configuración en los distintos clientes, se proporciona un asistente interactivo:
 
 ```bash
-# Recomendado: Instalación como ejecutable usando pip
-pip install -e .
+# Ejecutar el asistente de instalación interactivo
+python tools/install_mcp.py
 ```
 
-- Asegurarse de que Ollama esté corriendo o ejecutar `ollama serve` en terminal para iniciar el servidor.
-- Si no está cargado el modelo predeterminado, ejecutar `ollama pull nomic-embed-text` para descargarlo.
+Este script automatiza el flujo completo de instalación:
+1. Detecta si Ollama está activo en el puerto `11434` y si posee el modelo `nomic-embed-text`.
+2. Solicita interactivamente la ruta para el directorio base de conocimientos (`LLM_WIKI_DIR`).
+3. Resuelve las rutas absolutas del entorno virtual `.venv` y de `server.py`.
+4. Escribe/actualiza la configuración de `llm-wiki-memory` en Claude Desktop, Claude Code y Google Antigravity.
+5. Genera la configuración stdio basada en `uvx` para otros clientes.
 
-Agrega la configuración a tu cliente MCP preferido (Claude Code, Cursor, etc.):
+---
 
+### 1. Parámetros y Variables de Entorno
+
+El servidor requiere o soporta las siguientes variables de entorno en su ejecución:
+- `LLM_WIKI_DIR`: (Obligatorio si no existe archivo de configuración local) Ruta absoluta al directorio raíz del conocimiento. El servidor asumirá que las notas residen en `wiki/` y los recursos en `sources/` dentro de este directorio base, además de ubicar en él la base de datos SQLite `wiki.db`.
+- `MCP_PROJECT_ID`: Identificador del proyecto activo para aislar el contexto de las notas y evitar mezclar bases de conocimientos de proyectos distintos. Por defecto se utiliza `llm_wiki` o el nombre de la carpeta contenedora si no se especifica.
+- `OLLAMA_EMBED_MODEL`: Modelo de embedding a utilizar. Por defecto se usa `nomic-embed-text`.
+- `OLLAMA_EMBED_DIMS`: Dimensión de los embeddings generados por el modelo (por defecto `768` para `nomic-embed-text`).
+
+> **⚠️ Atención sobre los Embeddings:** Si decides cambiar el modelo vectorial (por ejemplo, a `mxbai-embed-large` de 1024 dimensiones), **DEBES borrar físicamente la base de datos** (`rm ~/.config/mcp-wiki/mcp-wiki.db`) antes de arrancar. `sqlite-vec` construye su esquema basándose en esa dimensión y arrojará un error si intentas mezclar vectores de distintos tamaños.
+
+---
+
+### 2. Configuración Manual por Cliente
+
+Si prefieres registrar el servidor manualmente, a continuación se detallan los bloques de configuración para cada cliente compatible utilizando la ruta genérica de ejemplo `/Users/tu_usuario/Cerebro`.
+
+#### A. Google Antigravity
+Google Antigravity soporta configuraciones de servidores MCP tanto a nivel global como a nivel de proyecto (local):
+*   **Configuración Global** (`~/.gemini/config/mcp_config.json`):
+    ```json
+    {
+      "mcpServers": {
+        "llm-wiki-memory": {
+          "command": "/Users/tu_usuario/Desarrollo/llm_wiki/.venv/bin/python",
+          "args": ["/Users/tu_usuario/Desarrollo/llm_wiki/server.py"],
+          "env": {
+            "LLM_WIKI_DIR": "/Users/tu_usuario/Cerebro",
+            "MCP_PROJECT_ID": "llm_wiki"
+          }
+        }
+      }
+    }
+    ```
+*   **Configuración Local** (`.agents/mcp_config.json`):
+    Ubica el mismo bloque JSON en un archivo llamado `mcp_config.json` dentro de la carpeta `.agents/` en la raíz del proyecto para habilitar el servidor únicamente dentro de este espacio de trabajo.
+
+#### B. Claude Desktop
+Para el cliente de escritorio oficial de Claude, agrega el servidor en `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
     "llm-wiki-memory": {
-      "command": "llm-wiki-mcp",
-      "args": [],
+      "command": "/Users/tu_usuario/Desarrollo/llm_wiki/.venv/bin/python",
+      "args": ["/Users/tu_usuario/Desarrollo/llm_wiki/server.py"],
       "env": {
-        "MCP_PROJECT_ID": "mi_proyecto_principal",
-        "OLLAMA_EMBED_MODEL": "nomic-embed-text",
-        "OLLAMA_EMBED_DIMS": "768"
+        "LLM_WIKI_DIR": "/Users/tu_usuario/Cerebro",
+        "MCP_PROJECT_ID": "llm_wiki"
       }
     }
   }
 }
 ```
 
-### Configuración Portátil vía `uvx` (Recomendado)
+#### C. Claude Code
+La CLI de Claude Code almacena sus configuraciones en `~/.claude.json`. Para configurar este servidor MCP de memoria semántica específicamente bajo el espacio de trabajo de este proyecto, agrégalo bajo el bloque de `"projects"`:
+```json
+{
+  "projects": {
+    "/Users/tu_usuario/Desarrollo/llm_wiki": {
+      "mcpServers": {
+        "llm-wiki-memory": {
+          "command": "/Users/tu_usuario/Desarrollo/llm_wiki/.venv/bin/python",
+          "args": ["/Users/tu_usuario/Desarrollo/llm_usuario/server.py"],
+          "env": {
+            "LLM_WIKI_DIR": "/Users/tu_usuario/Cerebro",
+            "MCP_PROJECT_ID": "llm_wiki"
+          }
+        }
+      }
+    }
+  }
+}
+```
 
-Si deseas usar este MCP en clientes `stdio` sin instalar dependencias globales, puedes usar `uvx` definiendo la variable de entorno `LLM_WIKI_DIR` para indicarle dónde ubicar la carpeta de conocimientos física:
-
+#### D. Clientes IDE STDIO Estándar (Cursor, Roo-Code, Cline) vía `uvx`
+Si deseas usar este MCP en clientes `stdio` sin instalar dependencias globales o locales fijas, puedes consumirlo a través de `uvx` configurando el cliente del IDE de la siguiente manera:
 ```json
 {
   "mcpServers": {
     "llm-wiki-memory": {
       "command": "uvx",
-      "args": ["--from", "/ruta/a/tu/clon/de/llm_wiki", "llm-wiki-mcp"],
+      "args": [
+        "--from",
+        "/Users/tu_usuario/Desarrollo/llm_wiki",
+        "llm-wiki-mcp"
+      ],
       "env": {
-        "LLM_WIKI_DIR": "/Users/tu_usuario/Documentos/Mi_Wiki/wiki",
-        "MCP_PROJECT_ID": "mi_proyecto_principal"
+        "LLM_WIKI_DIR": "/Users/tu_usuario/Cerebro",
+        "MCP_PROJECT_ID": "llm_wiki"
       }
     }
   }
