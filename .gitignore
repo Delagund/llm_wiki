@@ -4,6 +4,8 @@
 # Ignorar el contenido personal pero mantener las carpetas raíz activas
 wiki/*
 !wiki/.gitkeep
+.llm_wiki_config.json
+wiki.db
 
 sources/*
 !sources/.gitkeep

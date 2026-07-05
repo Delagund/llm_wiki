@@ -8,13 +8,13 @@ Un Servidor MCP (Model Context Protocol) diseñado para dotar a Asistentes de IA
 
 Este servidor de memoria semántica ha evolucionado para alinearse con los principios de interoperabilidad y estructuración formal del conocimiento.
 
-* **Búsqueda Híbrida (Vectorial + Léxica):** Realiza búsquedas vectoriales avanzadas con KNN a través de `sqlite-vec` y modelos locales (Ollama), con una degradación elegante (fallback) hacia Full-Text Search (FTS5) en caso de fallas o timeouts de Ollama.
-* **Soporte Híbrido Markdown + HTML Semántico:** Además de notas clásicas en Markdown, el sistema es compatible con notas escritas en **HTML Puro y Minimalista**.
-* **Enfoque OKF (Open Knowledge Format):** Las notas estructuradas permiten mapear relaciones y clasificar el conocimiento mediante etiquetas y propiedades semánticas tipadas, optimizando el consumo de tokens y la consistencia.
-* **Syntax-Aware Chunking:** Almacena notas fragmentadas (~2000 caracteres) respetando la sintaxis del lenguaje, evitando truncar bloques lógicos de código Markdown o etiquetas de bloque HTML, y favoreciendo un overlap controlado (200 caracteres).
-* **Control de Idempotencia Estricto:** Evita indexar el mismo contenido varias veces usando un hash por fragmento, solucionando las brechas fantasmas y la degradación del rendimiento por acumulación excesiva de información duplicada.
-* **Aislamiento de Proyectos:** Búsqueda contextualmente aislada pero con capacidad de heredar "Conocimiento Global" transversal a múltiples repositorios.
-* **Linter de Integridad Cero-Latencia:** Linter nativo 100% Python (`tools/lint.py`) que audita reglas restrictivas sobre la estructura de la wiki (etiquetas balanceadas, enlaces tipados, etc.) y levanta auto-sincronizaciones en el propio servidor MCP (`--ingest`) de inmediato tras detectar cambios.
+- **Búsqueda Híbrida (Vectorial + Léxica):** Realiza búsquedas vectoriales avanzadas con KNN a través de `sqlite-vec` y modelos locales (Ollama), con una degradación elegante (fallback) hacia Full-Text Search (FTS5) en caso de fallas o timeouts de Ollama.
+- **Soporte Híbrido Markdown + HTML Semántico:** Además de notas clásicas en Markdown, el sistema es compatible con notas escritas en **HTML Puro y Minimalista**.
+- **Enfoque OKF (Open Knowledge Format):** Las notas estructuradas permiten mapear relaciones y clasificar el conocimiento mediante etiquetas y propiedades semánticas tipadas, optimizando el consumo de tokens y la consistencia.
+- **Syntax-Aware Chunking:** Almacena notas fragmentadas (~2000 caracteres) respetando la sintaxis del lenguaje, evitando truncar bloques lógicos de código Markdown o etiquetas de bloque HTML, y favoreciendo un overlap controlado (200 caracteres).
+- **Control de Idempotencia Estricto:** Evita indexar el mismo contenido varias veces usando un hash por fragmento, solucionando las brechas fantasmas y la degradación del rendimiento por acumulación excesiva de información duplicada.
+- **Aislamiento de Proyectos:** Búsqueda contextualmente aislada pero con capacidad de heredar "Conocimiento Global" transversal a múltiples repositorios.
+- **Linter de Integridad Cero-Latencia:** Linter nativo 100% Python (`tools/lint.py`) que audita reglas restrictivas sobre la estructura de la wiki (etiquetas balanceadas, enlaces tipados, etc.) y levanta auto-sincronizaciones en el propio servidor MCP (`--ingest`) de inmediato tras detectar cambios.
 
 ---
 
@@ -33,13 +33,13 @@ El uso de HTML minimalista (cero CSS, sin clases ni estilos inline) presenta mú
 
 El proyecto ha completado de forma exitosa sus **7 Fases del Plan de Trabajo Escalonado**:
 
-* **Fase 1: Motor SQLite & RAG Híbrido:** Persistencia en SQLite, embeddings a través de Ollama (`nomic-embed-text`) y búsqueda híbrida KNN/FTS5 con fallback automático.
-* **Fase 2: Estrategia de Chunking Sintáctico:** Segmentación inteligente de archivos basada en semántica y sintaxis Markdown.
-* **Fase 3: Idempotencia de Datos:** Deduplicación física mediante hashing a nivel de fragmentos.
-* **Fase 4: Soporte de Notas Híbridas (HTML):** Ingestión completa de HTML minimalista compatible con linter local.
-* **Fase 5: Linter de Integridad & Grafo:** Implementación de `tools/lint.py` para control estricto de rutas de archivos, kebab-case, etiquetas balanceadas, enlaces en cascada y referencias circulares.
-* **Fase 6: Mecánica de Ingesta Asíncrona (Lazy Sync):** Detección en segundo plano de cambios en archivos durante el arranque (`startup_lazy_check`) para evitar bloqueos en el hilo principal del servidor MCP.
-* **Fase 7: Directrices de Skill de Agente:** Configuración de instrucciones arquitectónicas integradas en `.agents/skills/manage-memory/SKILL.md` para guiar de manera autónoma a los agentes en el uso del grafo híbrido y sus convenciones.
+- **Fase 1: Motor SQLite & RAG Híbrido:** Persistencia en SQLite, embeddings a través de Ollama (`nomic-embed-text`) y búsqueda híbrida KNN/FTS5 con fallback automático.
+- **Fase 2: Estrategia de Chunking Sintáctico:** Segmentación inteligente de archivos basada en semántica y sintaxis Markdown.
+- **Fase 3: Idempotencia de Datos:** Deduplicación física mediante hashing a nivel de fragmentos.
+- **Fase 4: Soporte de Notas Híbridas (HTML):** Ingestión completa de HTML minimalista compatible con linter local.
+- **Fase 5: Linter de Integridad & Grafo:** Implementación de `tools/lint.py` para control estricto de rutas de archivos, kebab-case, etiquetas balanceadas, enlaces en cascada y referencias circulares.
+- **Fase 6: Mecánica de Ingesta Asíncrona (Lazy Sync):** Detección en segundo plano de cambios en archivos durante el arranque (`startup_lazy_check`) para evitar bloqueos en el hilo principal del servidor MCP.
+- **Fase 7: Directrices de Skill de Agente:** Configuración de instrucciones arquitectónicas integradas en `.agents/skills/manage-memory/SKILL.md` para guiar de manera autónoma a los agentes en el uso del grafo híbrido y sus convenciones.
 
 ---
 
@@ -107,7 +107,7 @@ Si deseas usar este MCP en clientes `stdio` sin instalar dependencias globales, 
 
 ---
 
-## 🤖 Configuración para Agentes (Agent Skills)
+## 🤖 Configuración para Agentes (SKILL.md)
 
 Para que cualquier modelo de lenguaje o agente IA (Cursor, Claude Code) entienda perfectamente los protocolos y flujos del servidor MCP sin intervención manual, debes indicarle que cree su propia habilidad o _Skill_.
 
@@ -115,7 +115,7 @@ Para que cualquier modelo de lenguaje o agente IA (Cursor, Claude Code) entienda
 
 > "Por favor, crea un archivo en `.agents/skills/manage-memory/SKILL.md` con el siguiente contenido exacto para gestionar tu forma de procesar la memoria en este proyecto:"
 
-```yaml
+````yaml
 ---
 name: manage-memory
 description: Instrucciones arquitectónicas sobre cómo guardar, procesar o buscar conocimientos, PDFs, y reflexiones dentro del ecosistema LLM-Wiki MCP. Usa este skill cuando el usuario pida "memorizar", "guardar" o procesar nueva información.
@@ -123,43 +123,55 @@ description: Instrucciones arquitectónicas sobre cómo guardar, procesar o busc
 
 # Flujo de Operación de la Memoria Semántica (LLM Wiki)
 
-Actúas en un entorno respaldado por un servidor MCP de memoria semántica. Tu responsabilidad es procesar información cruda y transformarla en notas estructuradas en HTML minimalista. NO debes indexar vectores manualmente, el servidor MCP (`server.py`) hace esto automáticamente cuando usas las herramientas adecuadas.
+Actúas en un entorno respaldado por un servidor MCP de memoria semántica. Tu responsabilidad es procesar información cruda y transformarla en notas altamente estructuradas. NO debes indexar vectores manualmente, el servidor MCP (`server.py`) hace esto automáticamente cuando usas las herramientas adecuadas.
 
-## Escenario 1: Recibes un Archivo Crudo (PDF, Código, Doc) o un Link
+## Escenario 0: Inicialización
+Si el servidor no está inicializado o falla la carga, debes usar `initialize_project(base_path)` para configurarlo adecuadamente antes de continuar con cualquier operación.
 
-Si el usuario te proporciona un documento o te pide guardar un archivo externo en la base de conocimientos:
+## Formato Híbrido y Metadatos YAML
+Debes priorizar la creación de archivos `.html` minimalistas (sin CSS, atributos `style` ni `class`). Los archivos Markdown (`.md`) quedan restringidos únicamente para contenido legacy.
+Dentro de cada archivo `.html`, DEBES incluir un bloque de metadatos YAML usando comentarios HTML estandarizados.
 
-1. **Persistencia Física:** Primero, usando tus herramientas de sistema de archivos, descarga o guarda el contenido original crudo dentro de un subdirectorio lógico en `sources/` (ej. `sources/papers/paper.pdf` o `sources/articles/blog.md`).
-2. **Síntesis Analítica:** Lee y extrae las ideas principales, conceptos y conclusiones del archivo.
-3. **Ingesta (save_note):** Utiliza la herramienta MCP `save_note` para guardar tu análisis en la carpeta `wiki/` en formato `.html`.
-   _DEBES_ incluir un bloque YAML Frontmatter incrustado dentro de comentarios HTML que apunte físicamente al archivo guardado en `sources/`.
-   **Pasa SIEMPRE la ruta absoluta** como `file_path` (ej. `/Users/.../wiki/sources/summary-paper.html`), nunca la relativa.
-
-## Escenario 2: Reflexiones, Acuerdos de Diseño o Ideas
-
-1. **Síntesis:** Dale forma de concepto estructurado.
-2. **Ingesta Directa:** Llama a la herramienta `save_note` guardando el archivo en `wiki/` con extensión `.html`. Usa **ruta absoluta** en `file_path`.
-
-## Especificaciones Estrictas del Formato HTML y YAML
-CADA nota que envíes a `save_note` o guardes en `wiki/` debe estar en HTML puro, minimalista (sin atributos `style` ni `class`) y comenzar con este bloque YAML en comentarios HTML:
-
+El único campo obligatorio es `type`:
+```html
 <!--yaml
-title: "Título Descriptivo"
-type: "concept" # Valores permitidos: concept, entity, source-summary, comparison
-sources: ["sources/papers/tu_archivo.pdf"] # O rutas relativas a otros orígenes. Si no hay, pon []
-related: [] # Rutas relativas a otros archivos .html o .md relacionados
-created: YYYY-MM-DD # Reemplazar por la fecha ACTUAL
-updated: YYYY-MM-DD # Reemplazar por la fecha ACTUAL
-confidence: "high" # Valores permitidos: high, medium, low
+type: concept
 -->
+````
 
-### Reglas de Estructuración y Enlaces:
-- Agrupa y divide las secciones semánticas de la nota con `<section id="nombre_unico">`.
-- Enlaza notas usando etiquetas de ancla HTML con el atributo de relación tipada: `<a href="conceptos-relacionados.html" rel="concept-link">Texto descriptivo</a>`.
-- Todas las notas nuevas deben preferir extensión `.html`.
-- Todos los nombres de archivos dentro de `wiki/` deben estar en estricto **kebab-case** sin acentos (ej. `flujo-de-trabajo-efectivo.html`).
-- Ejecuta `python tools/lint.py` después de cada escritura para validar la integridad del grafo.
+Si el archivo representa una fuente original, el formato es:
+
+```html
+<!--yaml
+type: source-summary
+is_global: true
+-->
 ```
+
+## Taxonomía de Nodos y Directorios
+
+Según el `type` definido, el archivo debe guardarse en su directorio correspondiente. Si los directorios no existen, debes crearlos:
+
+- `type: concept` -> `wiki/concepts/[nombre].html`
+- `type: entity` -> `wiki/entities/[nombre].html`
+- `type: source-summary` -> `wiki/sources/[nombre].html`
+- `type: comparison` -> `wiki/comparisons/[nombre].html`
+
+## Enlaces (Grafo de Conocimiento)
+
+Para establecer relaciones entre nodos, debes utilizar etiquetas de anclaje estándar `<a href="ruta/al/archivo.ext" rel="...">`:
+
+- El atributo `href` debe apuntar a la ruta correcta con la **extensión exacta** (`.html` o `.md`) para evitar roturas.
+- El atributo `rel` debe definir el tipo de relación y utilizar uno de los siguientes valores: `dependency`, `concept-link`, `source-summary` o `comparison`.
+
+## Scoping y Estructuración de Contenido
+
+Usa las etiquetas semánticas `<article>` y `<section id="...">` para estructurar la información.
+Al utilizar la herramienta `search_wiki`, puedes (y debes, cuando aplique) enviar el parámetro `scoping_id` para acotar la búsqueda a contextos específicos dentro del HTML.
+
+## Sincronización Asíncrona (Eventual Consistency)
+
+Ten en cuenta que el procesamiento de la carpeta `/sources` y el proceso `startup_lazy_check` operan asincrónicamente. Como resultado, las búsquedas pueden experimentar **"consistencia eventual"** (la información recién agregada puede tardar un poco en aparecer). Adicionalmente, los archivos planos ubicados en `sources/` generan automáticamente su representación `.html` en el sistema.
 
 ---
 
