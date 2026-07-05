@@ -64,6 +64,7 @@ python tools/install_mcp.py
 ```
 
 Este script automatiza el flujo completo de instalación:
+
 1. Detecta si Ollama está activo en el puerto `11434` y si posee el modelo `nomic-embed-text`.
 2. Solicita interactivamente la ruta para el directorio base de conocimientos (`LLM_WIKI_DIR`).
 3. Resuelve las rutas absolutas del entorno virtual `.venv` y de `server.py`.
@@ -75,6 +76,7 @@ Este script automatiza el flujo completo de instalación:
 ### 1. Parámetros y Variables de Entorno
 
 El servidor requiere o soporta las siguientes variables de entorno en su ejecución:
+
 - `LLM_WIKI_DIR`: (Obligatorio si no existe archivo de configuración local) Ruta absoluta al directorio raíz del conocimiento. El servidor asumirá que las notas residen en `wiki/` y los recursos en `sources/` dentro de este directorio base, además de ubicar en él la base de datos SQLite `wiki.db`.
 - `MCP_PROJECT_ID`: Identificador del proyecto activo para aislar el contexto de las notas y evitar mezclar bases de conocimientos de proyectos distintos. Por defecto se utiliza `llm_wiki` o el nombre de la carpeta contenedora si no se especifica.
 - `OLLAMA_EMBED_MODEL`: Modelo de embedding a utilizar. Por defecto se usa `nomic-embed-text`.
@@ -89,33 +91,37 @@ El servidor requiere o soporta las siguientes variables de entorno en su ejecuci
 Si prefieres registrar el servidor manualmente, a continuación se detallan los bloques de configuración para cada cliente compatible utilizando la ruta genérica de ejemplo `/Users/tu_usuario/Cerebro`.
 
 #### A. Google Antigravity
+
 Google Antigravity soporta configuraciones de servidores MCP tanto a nivel global como a nivel de proyecto (local):
-*   **Configuración Global** (`~/.gemini/config/mcp_config.json`):
-    ```json
-    {
-      "mcpServers": {
-        "llm-wiki-memory": {
-          "command": "/Users/tu_usuario/Desarrollo/llm_wiki/.venv/bin/python",
-          "args": ["/Users/tu_usuario/Desarrollo/llm_wiki/server.py"],
-          "env": {
-            "LLM_WIKI_DIR": "/Users/tu_usuario/Cerebro",
-            "MCP_PROJECT_ID": "llm_wiki"
-          }
+
+- **Configuración Global** (`~/.gemini/config/mcp_config.json`):
+  ```json
+  {
+    "mcpServers": {
+      "llm-wiki-memory": {
+        "command": "/Users/tu_usuario/llm_wiki/.venv/bin/python",
+        "args": ["/Users/tu_usuario/llm_wiki/server.py"],
+        "env": {
+          "LLM_WIKI_DIR": "/Users/tu_usuario/Cerebro",
+          "MCP_PROJECT_ID": "llm_wiki"
         }
       }
     }
-    ```
-*   **Configuración Local** (`.agents/mcp_config.json`):
-    Ubica el mismo bloque JSON en un archivo llamado `mcp_config.json` dentro de la carpeta `.agents/` en la raíz del proyecto para habilitar el servidor únicamente dentro de este espacio de trabajo.
+  }
+  ```
+- **Configuración Local** (`.agents/mcp_config.json`):
+  Ubica el mismo bloque JSON en un archivo llamado `mcp_config.json` dentro de la carpeta `.agents/` en la raíz del proyecto para habilitar el servidor únicamente dentro de este espacio de trabajo.
 
 #### B. Claude Desktop
+
 Para el cliente de escritorio oficial de Claude, agrega el servidor en `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
 ```json
 {
   "mcpServers": {
     "llm-wiki-memory": {
-      "command": "/Users/tu_usuario/Desarrollo/llm_wiki/.venv/bin/python",
-      "args": ["/Users/tu_usuario/Desarrollo/llm_wiki/server.py"],
+      "command": "/Users/tu_usuario/llm_wiki/.venv/bin/python",
+      "args": ["/Users/tu_usuario/llm_wiki/server.py"],
       "env": {
         "LLM_WIKI_DIR": "/Users/tu_usuario/Cerebro",
         "MCP_PROJECT_ID": "llm_wiki"
@@ -126,15 +132,17 @@ Para el cliente de escritorio oficial de Claude, agrega el servidor en `~/Librar
 ```
 
 #### C. Claude Code
+
 La CLI de Claude Code almacena sus configuraciones en `~/.claude.json`. Para configurar este servidor MCP de memoria semántica específicamente bajo el espacio de trabajo de este proyecto, agrégalo bajo el bloque de `"projects"`:
+
 ```json
 {
   "projects": {
-    "/Users/tu_usuario/Desarrollo/llm_wiki": {
+    "/Users/tu_usuario/llm_wiki": {
       "mcpServers": {
         "llm-wiki-memory": {
-          "command": "/Users/tu_usuario/Desarrollo/llm_wiki/.venv/bin/python",
-          "args": ["/Users/tu_usuario/Desarrollo/llm_usuario/server.py"],
+          "command": "/Users/tu_usuario/llm_wiki/.venv/bin/python",
+          "args": ["/Users/tu_usuario/llm_wiki/server.py"],
           "env": {
             "LLM_WIKI_DIR": "/Users/tu_usuario/Cerebro",
             "MCP_PROJECT_ID": "llm_wiki"
@@ -147,17 +155,15 @@ La CLI de Claude Code almacena sus configuraciones en `~/.claude.json`. Para con
 ```
 
 #### D. Clientes IDE STDIO Estándar (Cursor, Roo-Code, Cline) vía `uvx`
+
 Si deseas usar este MCP en clientes `stdio` sin instalar dependencias globales o locales fijas, puedes consumirlo a través de `uvx` configurando el cliente del IDE de la siguiente manera:
+
 ```json
 {
   "mcpServers": {
     "llm-wiki-memory": {
       "command": "uvx",
-      "args": [
-        "--from",
-        "/Users/tu_usuario/Desarrollo/llm_wiki",
-        "llm-wiki-mcp"
-      ],
+      "args": ["--from", "/Users/tu_usuario/llm_wiki", "llm-wiki-mcp"],
       "env": {
         "LLM_WIKI_DIR": "/Users/tu_usuario/Cerebro",
         "MCP_PROJECT_ID": "llm_wiki"
