@@ -123,3 +123,66 @@ def test_search_wiki_hybrid_rrf(monkeypatch, initialized_server):
     result = search_wiki("Singleton arquitectura", current_project="project-delta")
     assert "Singleton" in result
     assert "semantic" in result or "lexical" in result
+
+
+def test_search_degradation_diagnostics(monkeypatch, initialized_server):
+    """Verifica el diagnostico y la degradacion cuando Ollama falla."""
+    monkeypatch.setattr("server.get_ollama_embedding", lambda x, *args, **kwargs: [0.1] * 768)
+    project_dir = os.path.join(initialized_server.wiki_dir, "project-degrad")
+    os.makedirs(project_dir, exist_ok=True)
+    file_path = os.path.join(project_dir, "note.md")
+    save_note(file_path, make_md("This is degradation test context.", title="note"))
+
+    monkeypatch.setattr("server.check_ollama_availability", lambda: False)
+    
+    result = search_wiki("degradation", current_project="project-degrad")
+    assert "[DIAGNÓSTICO]" in result
+    assert "Fallback FTS5 (Ollama fuera de línea): True" in result
+
+
+def test_search_speed_performance(monkeypatch, initialized_server):
+    """Verifica que la busqueda retorne rapido (< 200 ms)."""
+    import time
+    monkeypatch.setattr("server.get_ollama_embedding", lambda x, *args, **kwargs: [0.1] * 768)
+    monkeypatch.setattr("server.check_ollama_availability", lambda: True)
+    project_dir = os.path.join(initialized_server.wiki_dir, "project-speed")
+    os.makedirs(project_dir, exist_ok=True)
+    file_path = os.path.join(project_dir, "note.md")
+    save_note(file_path, make_md("Fast context data.", title="note"))
+
+    t0 = time.perf_counter()
+    result = search_wiki("Fast", current_project="project-speed")
+    t1 = time.perf_counter()
+
+    assert t1 - t0 < 0.2
+    assert "Tiempo DB:" in result
+
+
+def test_search_scoping(monkeypatch, initialized_server):
+    """Verifica el scoping por seccion html."""
+    monkeypatch.setattr("server.get_ollama_embedding", lambda x, *args, **kwargs: [0.1] * 768)
+    monkeypatch.setattr("server.check_ollama_availability", lambda: True)
+    project_dir = os.path.join(initialized_server.wiki_dir, "project-scope")
+    os.makedirs(project_dir, exist_ok=True)
+    file_path = os.path.join(project_dir, "note.html")
+    
+    html_content = (
+        '<!--yaml\n'
+        'title: scope_test\n'
+        'type: doc\n'
+        'scope: local\n'
+        '-->\n'
+        '<article id="main">'
+        '<section id="a">Soy de la seccion a</section>'
+        '<section id="b">Soy de la seccion b</section>'
+        '</article>'
+    )
+    save_note(file_path, html_content)
+
+    result_a = search_wiki("Soy de la", current_project="project-scope", scoping_id="main;a")
+    assert "seccion a" in result_a
+    assert "seccion b" not in result_a
+
+    result_none = search_wiki("Soy de la", current_project="project-scope", scoping_id="inexistente")
+    assert "seccion a" not in result_none
+    assert "seccion b" not in result_none

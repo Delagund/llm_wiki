@@ -392,7 +392,7 @@ def sanitize_fts_query(query: str) -> str:
 
 
 @mcp.tool()
-def search_wiki(query: str, current_project: str = None, limit: int = 5) -> str:
+def search_wiki(query: str, current_project: str = None, limit: int = 5, scoping_id: str = None) -> str:
     """
     Busca contexto usando búsqueda semántica híbrida (KNN Vec0 + FTS5) fusionada mediante RRF.
     Explicación: Si Ollama está disponible, ejecuta tanto búsqueda semántica como léxica,
@@ -431,7 +431,7 @@ def search_wiki(query: str, current_project: str = None, limit: int = 5) -> str:
         if use_vector and query_vector:
             # Explicación: Buscamos un k mayor (50) globalmente para evitar descartar coincidencias de proyecto antes del filtro
             cursor.execute("""
-                SELECT c.content, n.title, n.is_global, v.distance, c.id
+                SELECT c.content, n.title, n.is_global, v.distance, c.id, c.section_id
                 FROM vec_chunks v
                 JOIN document_chunks c ON v.chunk_id = c.id
                 JOIN notes n ON c.note_id = n.id
@@ -443,37 +443,49 @@ def search_wiki(query: str, current_project: str = None, limit: int = 5) -> str:
             vector_results = cursor.fetchall()
             
             for rank, row in enumerate(vector_results):
+                if scoping_id and row[5] != scoping_id:
+                    continue
                 chunk_id = row[4]
-                # row: (content, title, is_global, distance, id)
+                # row: (content, title, is_global, distance, id, section_id)
                 rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + (1.0 / (60.0 + rank + 1))
-                chunks_metadata[chunk_id] = (row[0], row[1], row[2], f"Distancia: {row[3]:.4f}")
+                chunks_metadata[chunk_id] = (row[0], row[1], row[2], f"Distancia: {row[3]:.4f}", row[5])
 
         # 2. Recuperación Léxica (FTS5)
         sanitized = sanitize_fts_query(query)
         if sanitized:
-            cursor.execute("""
-                SELECT c.content, n.title, n.is_global, c.id
+            fts_query_str = """
+                SELECT c.content, n.title, n.is_global, c.id, c.section_id
                 FROM fts_chunks f
                 JOIN document_chunks c ON f.chunk_id = c.id
                 JOIN notes n ON c.note_id = n.id
                 WHERE fts_chunks MATCH ?
                   AND (n.project_id = ? OR n.is_global = 1)
-                LIMIT 50
-            """, (sanitized, current_project))
+            """
+            fts_params = [sanitized, current_project]
+            if scoping_id:
+                fts_query_str += " AND c.section_id = ?"
+                fts_params.append(scoping_id)
+            fts_query_str += " LIMIT 50"
+            
+            cursor.execute(fts_query_str, tuple(fts_params))
             fts_results = cursor.fetchall()
             
             for rank, row in enumerate(fts_results):
                 chunk_id = row[3]
-                # row: (content, title, is_global, id)
+                # row: (content, title, is_global, id, section_id)
                 rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + (1.0 / (60.0 + rank + 1))
                 if chunk_id not in chunks_metadata:
-                    chunks_metadata[chunk_id] = (row[0], row[1], row[2], "Fallback FTS5")
+                    chunks_metadata[chunk_id] = (row[0], row[1], row[2], "FTS5 Léxico", row[4])
 
         # Explicación: Consolidamos y ordenamos los fragmentos fusionando ambos rankings
         sorted_chunks = sorted(rrf_scores.keys(), key=lambda cid: rrf_scores[cid], reverse=True)[:limit]
         results = [chunks_metadata[cid] for cid in sorted_chunks]
         
         t2 = time.perf_counter()
+        
+        time_embedding = (t1 - t0) * 1000
+        time_db = (t2 - t1) * 1000
+        time_total = (t2 - t0) * 1000
         
         logger.info({
             "action": "profiling",
@@ -485,20 +497,32 @@ def search_wiki(query: str, current_project: str = None, limit: int = 5) -> str:
             "vector_candidates": len(vector_results),
             "fts5_candidates": len(fts_results),
             "results_returned": len(results),
-            "embedding_ms": round((t1 - t0) * 1000, 2),
-            "db_search_ms": round((t2 - t1) * 1000, 2),
-            "total_ms": round((t2 - t0) * 1000, 2)
+            "embedding_ms": round(time_embedding, 2),
+            "db_search_ms": round(time_db, 2),
+            "total_ms": round(time_total, 2)
         }, "Search profiling")
+        
+        logger.info({"action": "search", "query": query, "scoping_id": scoping_id, "time_total_ms": time_total, "fallback_fts5": not use_vector})
         
         if not results:
             return f"No se encontró contexto semántico o léxico para el proyecto '{current_project}'."
 
-        output = []
+        output_str = (
+            "[DIAGNÓSTICO]\n"
+            f"- Fallback FTS5 (Ollama fuera de línea): {not use_vector}\n"
+            f"- Tiempo Embedding: {time_embedding:.1f} ms\n"
+            f"- Tiempo DB: {time_db:.1f} ms\n"
+            f"- Tiempo Total: {time_total:.1f} ms\n\n"
+        )
+
+        chunks_str = []
         for row in results:
             scope_tag = "[GLOBAL]" if row[2] == 1 else f"[{current_project}]"
-            output.append(f"### {scope_tag} Nota: {row[1]} ({row[3]})\n{row[0]}\n---")
+            section_id = row[4]
+            section_tag = f" [Sección: {section_id}]" if section_id else ""
+            chunks_str.append(f"### {scope_tag} Nota: {row[1]} ({row[3]}){section_tag}\n\n{row[0]}\n\n")
 
-        return "\n".join(output)
+        return output_str + "".join(chunks_str)
 
 
 @mcp.tool()

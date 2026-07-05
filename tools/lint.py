@@ -6,6 +6,60 @@ import yaml
 import unicodedata
 import subprocess
 from datetime import datetime
+from html.parser import HTMLParser
+
+class LintHTMLParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.errors = []
+        self.open_tags = []
+        self.local_links = []
+        self.void_tags = {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'}
+
+    def handle_starttag(self, tag, attrs):
+        attr_dict = dict(attrs)
+        
+        if tag == 'style':
+            self.errors.append("Etiqueta prohibida: <style>")
+            return
+            
+        if 'style' in attr_dict or 'class' in attr_dict:
+            self.errors.append(f"Atributos prohibidos ('style' o 'class') en etiqueta <{tag}>")
+            
+        if tag == 'section':
+            if 'id' not in attr_dict:
+                self.errors.append("Etiqueta <section> requiere el atributo 'id'")
+                
+        if tag == 'a':
+            if 'href' not in attr_dict:
+                self.errors.append("Etiqueta <a> requiere el atributo 'href'")
+            else:
+                href = attr_dict['href']
+                if not href.startswith('http') and not href.startswith('#'):
+                    rel = attr_dict.get('rel')
+                    self.local_links.append((href, rel))
+                    valid_rels = ['dependency', 'concept-link', 'source-summary', 'comparison']
+                    if rel and rel not in valid_rels:
+                        self.errors.append(f"Atributo rel='{rel}' inválido en enlace a '{href}'. Valores permitidos: {valid_rels}")
+        
+        if tag not in self.void_tags:
+            self.open_tags.append(tag)
+
+    def handle_endtag(self, tag):
+        if tag == 'style':
+            return
+            
+        if tag not in self.void_tags:
+            if not self.open_tags:
+                self.errors.append(f"Cierre de etiqueta </{tag}> sin etiqueta de apertura correspondiente.")
+            elif self.open_tags[-1] == tag:
+                self.open_tags.pop()
+            else:
+                self.errors.append(f"Etiqueta mal balanceada: se esperaba </{self.open_tags[-1]}> pero se encontró </{tag}>")
+
+    def check_final_balance(self):
+        for tag in self.open_tags:
+            self.errors.append(f"Etiqueta <{tag}> abierta pero no cerrada.")
 
 def normalize_link(link: str) -> str:
     """Normalize diacritics, lowercase, replace spaces/underscores with hyphens."""
@@ -74,8 +128,9 @@ def parse_note_content(content: str, extension: str = ".md"):
 
 def validate_metadata(data, extension=".md"):
     errors = []
+    warnings = []
     if not isinstance(data, dict):
-        return ["El frontmatter no es un diccionario válido."], None
+        return ["El frontmatter no es un diccionario válido."], [], None
     
     if extension == '.md':
         required_fields = ["title", "type", "sources", "related", "created", "updated"]
@@ -89,33 +144,35 @@ def validate_metadata(data, extension=".md"):
     # Validate type
     valid_types = ["concept", "entity", "source-summary", "comparison"]
     if data.get("type") not in valid_types:
-        errors.append(f"Tipo de nota inválido: '{data.get('type')}'. Valores permitidos: {valid_types}")
+        warnings.append(f"Tipo de nota desconocido: '{data.get('type')}'. Valores permitidos originales: {valid_types}")
 
     # Validate confidence
     if "confidence" in data:
         valid_confidences = ["high", "medium", "low"]
         if data["confidence"] not in valid_confidences:
-            errors.append(f"Nivel de confianza inválido: '{data['confidence']}'. Valores permitidos: {valid_confidences}")
+            warnings.append(f"Nivel de confianza desconocido: '{data['confidence']}'. Valores permitidos originales: {valid_confidences}")
 
     # Validate dates
     date_regex = re.compile(r'^\d{4}-\d{2}-\d{2}$')
-    if "created" in data and not date_regex.match(str(data["created"])):
-        errors.append(f"Formato de fecha 'created' inválido: '{data['created']}'. Debe ser YYYY-MM-DD.")
-    if "updated" in data and not date_regex.match(str(data["updated"])):
-        errors.append(f"Formato de fecha 'updated' inválido: '{data['updated']}'. Debe ser YYYY-MM-DD.")
+    if "created" in data and not date_regex.match(str(data.get("created", ""))):
+        errors.append(f"Formato de fecha 'created' inválido: '{data.get('created', '')}'. Debe ser YYYY-MM-DD.")
+    if "updated" in data and not date_regex.match(str(data.get("updated", ""))):
+        errors.append(f"Formato de fecha 'updated' inválido: '{data.get('updated', '')}'. Debe ser YYYY-MM-DD.")
 
     # Normalize list fields
-    if isinstance(data.get("sources"), str):
-        data["sources"] = [data["sources"]]
-    elif not data.get("sources"):
-        data["sources"] = []
+    if "sources" in data:
+        if isinstance(data["sources"], str):
+            data["sources"] = [data["sources"]]
+        elif not data["sources"]:
+            data["sources"] = []
+            
+    if "related" in data:
+        if isinstance(data["related"], str):
+            data["related"] = [data["related"]]
+        elif not data["related"]:
+            data["related"] = []
 
-    if isinstance(data.get("related"), str):
-        data["related"] = [data["related"]]
-    elif not data.get("related"):
-        data["related"] = []
-
-    return errors, data
+    return errors, warnings, data
 
 def main():
     args = sys.argv
@@ -131,6 +188,7 @@ def main():
         return
         
     errors = []
+    warnings = []
     all_file_names = set()
     all_inbound_links = set()
     titles_map = {}
@@ -152,39 +210,54 @@ def main():
             errors.append({"file": relative_path, "msg": "No se pudo leer el archivo."})
             continue
             
-        if True:
-            if not validate_kebab_case(base_name):
-                errors.append({"file": relative_path, "msg": f"Nombre de archivo inválido: '{base_name}{ext}'. Debe estar en kebab-case estricto."})
-                
-            data, _, parse_err = parse_note_content(content, ext)
-            if parse_err:
-                for err in parse_err:
-                    errors.append({"file": relative_path, "msg": f"YAML Frontmatter inválido: {err}"})
-            elif data is not None:
-                validation_errors, parsed_data = validate_metadata(data, ext)
-                if validation_errors:
-                    for err in validation_errors:
-                        errors.append({"file": relative_path, "msg": f"Metadata inválida: {err}"})
-                        
-                title = parsed_data.get("title")
-                if title:
-                    norm_title = normalize_link(title)
-                    if norm_title in titles_map:
-                        errors.append({"file": relative_path, "msg": f"Título duplicado: '{title}' ya existe en '{titles_map[norm_title]}'."})
-                    else:
-                        titles_map[norm_title] = relative_path
-                        
-                for source in parsed_data.get("sources", []):
-                    if not os.path.exists(os.path.join(current_dir, source)):
-                        errors.append({"file": relative_path, "msg": f"Archivo de origen no encontrado en disco: '{source}'."})
-                        
-                for relation in parsed_data.get("related", []):
-                    if not os.path.exists(os.path.join(current_dir, relation)):
-                        errors.append({"file": relative_path, "msg": f"Archivo relacionado no encontrado en disco: '{relation}'."})
-                        
-                type_ = parsed_data.get("type")
-                if type_ not in ["concept", "entity"]:
-                    all_inbound_links.add(base_name_lower)
+        if not validate_kebab_case(base_name):
+            errors.append({"file": relative_path, "msg": f"Nombre de archivo inválido: '{base_name}{ext}'. Debe estar en kebab-case estricto."})
+            
+        data, _, parse_err = parse_note_content(content, ext)
+        if parse_err:
+            for err in parse_err:
+                errors.append({"file": relative_path, "msg": f"YAML Frontmatter inválido: {err}"})
+        elif data is not None:
+            validation_errors, validation_warnings, parsed_data = validate_metadata(data, ext)
+            if validation_errors:
+                for err in validation_errors:
+                    errors.append({"file": relative_path, "msg": f"Metadata inválida: {err}"})
+            if validation_warnings:
+                for warn in validation_warnings:
+                    warnings.append({"file": relative_path, "msg": f"Metadata Warning: {warn}"})
+                    
+            type_ = parsed_data.get("type")
+            if ext == ".html" and type_:
+                type_mapping = {
+                    "concept": "concepts",
+                    "entity": "entities",
+                    "source-summary": "sources",
+                    "comparison": "comparisons"
+                }
+                expected_dir = type_mapping.get(type_)
+                if expected_dir:
+                    path_parts = relative_path.split(os.sep)
+                    if expected_dir not in path_parts:
+                        errors.append({"file": relative_path, "msg": f"Ubicación física errónea: type '{type_}' debería estar en una carpeta '{expected_dir}'."})
+
+            title = parsed_data.get("title")
+            if title:
+                norm_title = normalize_link(title)
+                if norm_title in titles_map:
+                    errors.append({"file": relative_path, "msg": f"Título duplicado: '{title}' ya existe en '{titles_map[norm_title]}'."})
+                else:
+                    titles_map[norm_title] = relative_path
+                    
+            for source in parsed_data.get("sources", []):
+                if not os.path.exists(os.path.join(current_dir, source)):
+                    errors.append({"file": relative_path, "msg": f"Archivo de origen no encontrado en disco: '{source}'."})
+                    
+            for relation in parsed_data.get("related", []):
+                if not os.path.exists(os.path.join(current_dir, relation)):
+                    errors.append({"file": relative_path, "msg": f"Archivo relacionado no encontrado en disco: '{relation}'."})
+                    
+            if type_ not in ["concept", "entity"]:
+                all_inbound_links.add(base_name_lower)
         else:
             all_inbound_links.add(base_name_lower)
             
@@ -193,6 +266,25 @@ def main():
             all_inbound_links.add(link)
             if link not in ["index", "log", "overview"] and link not in all_file_names:
                 errors.append({"file": relative_path, "msg": f"Enlace roto detectado: [[{link}]] no coincide con ningún archivo."})
+
+        if ext == ".html":
+            parser = LintHTMLParser()
+            parser.feed(content)
+            parser.check_final_balance()
+            for err in parser.errors:
+                errors.append({"file": relative_path, "msg": f"Error HTML: {err}"})
+            
+            for href, rel in parser.local_links:
+                link_base = normalize_link(os.path.splitext(os.path.basename(href))[0])
+                all_inbound_links.add(link_base)
+                
+                if href.startswith('sources/'):
+                    target_path = os.path.join(current_dir, href)
+                else:
+                    target_path = os.path.join(wiki_dir, href)
+                    
+                if not os.path.exists(target_path):
+                    errors.append({"file": relative_path, "msg": f"Enlace roto detectado (href): {href}"})
                 
     for file_path in md_files:
         relative_path = os.path.relpath(file_path, current_dir)
@@ -203,10 +295,16 @@ def main():
     print("\n---------------- REPORTE DE AUDITORÍA (LINT) ----------------")
     print(f"Total de archivos verificados: {len(md_files)}")
     
+    if warnings:
+        print(f"⚠️  Se encontraron {len(warnings)} advertencia(s):")
+        for w in warnings:
+            print(f"⚠️ {w['file']}: {w['msg']}")
+        print("-" * 61)
+    
     if not errors:
-        print("✅ ¡El Wiki está completamente sano! No se encontraron problemas.")
+        print("✅ ¡El Wiki está completamente sano! No se encontraron errores críticos.")
     else:
-        print(f"⚠️  Se encontraron {len(errors)} anomalía(s):")
+        print(f"❌ Se encontraron {len(errors)} error(es) crítico(s):")
         print("-" * 61)
         for e in errors:
             print(f"❌ {e['file']}: {e['msg']}")

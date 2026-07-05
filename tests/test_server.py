@@ -23,6 +23,8 @@ def test_ollama_timeout_handling(monkeypatch):
         raise requests.exceptions.Timeout("Read timeout")
 
     monkeypatch.setattr(requests, "post", mock_post)
+    monkeypatch.setattr("ollama_integration._ollama_available", None)
+    monkeypatch.setattr("ollama_integration._last_check_time", 0.0)
 
     with pytest.raises(OllamaTimeout) as exc:
         get_ollama_embedding("test query")
@@ -37,6 +39,8 @@ def test_ollama_connection_error(monkeypatch):
         raise requests.exceptions.ConnectionError("Connection refused")
 
     monkeypatch.setattr(requests, "post", mock_post)
+    monkeypatch.setattr("ollama_integration._ollama_available", None)
+    monkeypatch.setattr("ollama_integration._last_check_time", 0.0)
 
     with pytest.raises(requests.exceptions.RequestException):
         get_ollama_embedding("test query")
