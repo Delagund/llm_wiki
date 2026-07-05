@@ -8,7 +8,7 @@ import struct
 import time
 import threading
 from dataclasses import dataclass
-from database import init_db, create_schema
+from database import init_db, create_schema, VEC_AVAILABLE, DB_LOCK, ensure_schema
 from ollama_integration import get_ollama_embedding, OllamaTimeout, check_ollama_availability
 from utils.chunking_strategy import chunk_text
 from utils.logger import logger
@@ -150,8 +150,7 @@ def initialize_project(base_path: str) -> dict:
 
     # Crear base de datos con esquema
     db_path = os.path.join(base_path, "wiki.db")
-    with init_db(db_path) as conn:
-        create_schema(conn)
+    ensure_schema(db_path)
 
     # Escribir configuracion local
     config_data = {
@@ -189,91 +188,98 @@ def save_note(file_path: str, content: str) -> dict:
     config = require_initialized()
     file_path = validate_path_sandbox(file_path, config.wiki_dir)
 
+    tmp_path = file_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp_path, file_path)
+
     t0 = time.perf_counter()
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     
-    with init_db(config.db_path) as conn:
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT content_hash FROM notes WHERE file_path = ?", (file_path,))
-        row = cursor.fetchone()
-        if row and row[0] == content_hash:
-            return {"status": "SKIPPED", "message": "Content hash matches existing note. Skipped."}
+    with DB_LOCK:
+        with init_db(config.db_path) as conn:
+            cursor = conn.cursor()
             
-        yaml_meta, plain_text = parse_frontmatter(content)
-        project_id, is_global = determine_scope(file_path, yaml_meta, config.wiki_dir)
-        note_id = str(uuid.uuid4())
-        
-        try:
-            t1 = time.perf_counter()
-            cursor.execute("BEGIN TRANSACTION")
-            
-            cursor.execute("SELECT id FROM notes WHERE file_path = ?", (file_path,))
-            old_row = cursor.fetchone()
-            if old_row:
-                old_id = old_row[0]
-                cursor.execute("DELETE FROM vec_chunks WHERE chunk_id IN (SELECT id FROM document_chunks WHERE note_id = ?)", (old_id,))
-                cursor.execute("DELETE FROM fts_chunks WHERE chunk_id IN (SELECT id FROM document_chunks WHERE note_id = ?)", (old_id,))
-                cursor.execute("DELETE FROM notes WHERE id = ?", (old_id,))
+            cursor.execute("SELECT content_hash FROM notes WHERE file_path = ?", (file_path,))
+            row = cursor.fetchone()
+            if row and row[0] == content_hash:
+                return {"status": "SKIPPED", "message": "Content hash matches existing note. Skipped."}
                 
-            title = yaml_meta.get("title", os.path.basename(file_path))
-            cursor.execute(
-                "INSERT INTO notes (id, file_path, title, project_id, is_global, content_hash, yaml_metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (note_id, file_path, title, project_id, is_global, content_hash, json.dumps(yaml_meta, default=str))
-            )
+            yaml_meta, plain_text = parse_frontmatter(content)
+            project_id, is_global = determine_scope(file_path, yaml_meta, config.wiki_dir)
+            note_id = str(uuid.uuid4())
             
-            chunks = chunk_text(plain_text)
-            t2 = time.perf_counter()
-            for idx, chunk in enumerate(chunks):
-                vector = get_ollama_embedding(chunk)
-                cursor.execute(
-                    "INSERT INTO document_chunks (note_id, chunk_index, content) VALUES (?, ?, ?)",
-                    (note_id, idx, chunk)
-                )
-                chunk_id = cursor.lastrowid
+            try:
+                t1 = time.perf_counter()
+                cursor.execute("BEGIN TRANSACTION")
                 
+                cursor.execute("SELECT id FROM notes WHERE file_path = ?", (file_path,))
+                old_row = cursor.fetchone()
+                if old_row:
+                    old_id = old_row[0]
+                    cursor.execute("DELETE FROM vec_chunks WHERE chunk_id IN (SELECT id FROM document_chunks WHERE note_id = ?)", (old_id,))
+                    cursor.execute("DELETE FROM fts_chunks WHERE chunk_id IN (SELECT id FROM document_chunks WHERE note_id = ?)", (old_id,))
+                    cursor.execute("DELETE FROM notes WHERE id = ?", (old_id,))
+                    
+                title = yaml_meta.get("title", os.path.basename(file_path))
                 cursor.execute(
-                    "INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?, ?)",
-                    (chunk_id, serialize_f32(vector))
-                )
-                cursor.execute(
-                    "INSERT INTO fts_chunks (chunk_id, content) VALUES (?, ?)",
-                    (chunk_id, chunk)
+                    "INSERT INTO notes (id, file_path, title, project_id, is_global, content_hash, yaml_metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (note_id, file_path, title, project_id, is_global, content_hash, json.dumps(yaml_meta, default=str))
                 )
                 
-            t3 = time.perf_counter()
-            cursor.execute("INSERT INTO ingestion_logs (note_id, status) VALUES (?, ?)", (file_path, "SUCCESS"))
-            conn.commit()
-            t4 = time.perf_counter()
-            
-            logger.info({
-                "action": "profiling",
-                "file": file_path,
-                "project_id": project_id,
-                "is_global": is_global,
-                "char_count": len(content),
-                "chunks": len(chunks),
-                "parse_ms": round((t1 - t0) * 1000, 2),
-                "chunking_ms": round((t2 - t1) * 1000, 2),
-                "embedding_ms": round((t3 - t2) * 1000, 2),
-                "db_commit_ms": round((t4 - t3) * 1000, 2),
-                "total_ms": round((t4 - t0) * 1000, 2)
-            }, "Ingestion profiling")
-            
-            return {"status": "SUCCESS", "message": f"Ingested {len(chunks)} chunks."}
-            
-        except OllamaTimeout as e:
-            conn.rollback()
-            cursor.execute("INSERT INTO ingestion_logs (note_id, status, error_message) VALUES (?, ?, ?)", (file_path, "SKIPPED", str(e)))
-            conn.commit()
-            logger.warning({"file": file_path, "error": str(e)}, "Timeout during ingestion")
-            return {"status": "SKIPPED", "message": f"Ollama timeout: {str(e)}"}
-        except Exception as e:
-            conn.rollback()
-            cursor.execute("INSERT INTO ingestion_logs (note_id, status, error_message) VALUES (?, ?, ?)", (file_path, "FAILED", str(e)))
-            conn.commit()
-            logger.error({"file": file_path, "error": str(e)}, "Failed to save note")
-            return {"status": "FAILED", "message": f"Error: {str(e)}"}
+                chunks = chunk_text(plain_text)
+                t2 = time.perf_counter()
+                for idx, chunk in enumerate(chunks):
+                    vector = get_ollama_embedding(chunk)
+                    cursor.execute(
+                        "INSERT INTO document_chunks (note_id, chunk_index, content) VALUES (?, ?, ?)",
+                        (note_id, idx, chunk)
+                    )
+                    chunk_id = cursor.lastrowid
+                    
+                    if VEC_AVAILABLE:
+                        cursor.execute(
+                            "INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?, ?)",
+                            (chunk_id, serialize_f32(vector))
+                        )
+                    cursor.execute(
+                        "INSERT INTO fts_chunks (chunk_id, content) VALUES (?, ?)",
+                        (chunk_id, chunk)
+                    )
+                    
+                t3 = time.perf_counter()
+                cursor.execute("INSERT INTO ingestion_logs (note_id, status) VALUES (?, ?)", (file_path, "SUCCESS"))
+                conn.commit()
+                t4 = time.perf_counter()
+                
+                logger.info({
+                    "action": "profiling",
+                    "file": file_path,
+                    "project_id": project_id,
+                    "is_global": is_global,
+                    "char_count": len(content),
+                    "chunks": len(chunks),
+                    "parse_ms": round((t1 - t0) * 1000, 2),
+                    "chunking_ms": round((t2 - t1) * 1000, 2),
+                    "embedding_ms": round((t3 - t2) * 1000, 2),
+                    "db_commit_ms": round((t4 - t3) * 1000, 2),
+                    "total_ms": round((t4 - t0) * 1000, 2)
+                }, "Ingestion profiling")
+                
+                return {"status": "SUCCESS", "message": f"Ingested {len(chunks)} chunks."}
+                
+            except OllamaTimeout as e:
+                conn.rollback()
+                cursor.execute("INSERT INTO ingestion_logs (note_id, status, error_message) VALUES (?, ?, ?)", (file_path, "SKIPPED", str(e)))
+                conn.commit()
+                logger.warning({"file": file_path, "error": str(e)}, "Timeout during ingestion")
+                return {"status": "SKIPPED", "message": f"Ollama timeout: {str(e)}"}
+            except Exception as e:
+                conn.rollback()
+                cursor.execute("INSERT INTO ingestion_logs (note_id, status, error_message) VALUES (?, ?, ?)", (file_path, "FAILED", str(e)))
+                conn.commit()
+                logger.error({"file": file_path, "error": str(e)}, "Failed to save note")
+                return {"status": "FAILED", "message": f"Error: {str(e)}"}
 
 
 def sanitize_fts_query(query: str) -> str:
@@ -306,7 +312,7 @@ def search_wiki(query: str, current_project: str = None, limit: int = 5) -> str:
     query_vector = None
 
     # Explicación: Se chequea la disponibilidad de Ollama una única vez para evitar timeouts repetitivos
-    if check_ollama_availability():
+    if VEC_AVAILABLE and check_ollama_availability():
         try:
             # Explicación: Timeout ajustado a 2s para búsquedas interactivas ágiles
             query_vector = get_ollama_embedding(query, timeout=2.0)
@@ -494,6 +500,7 @@ def main_run():
     active_config = load_config()
 
     if active_config:
+        ensure_schema(active_config.db_path)
         logger.info({
             "db_path": active_config.db_path,
             "wiki_dir": active_config.wiki_dir,
@@ -503,7 +510,6 @@ def main_run():
 
         try:
             with init_db(active_config.db_path) as conn:
-                create_schema(conn)
                 logger.info({
                     "db_path": active_config.db_path,
                     "status": "connected"

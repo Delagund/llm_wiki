@@ -183,3 +183,24 @@ def test_initialize_project_tool(monkeypatch, tmp_path):
     except ValueError as e:
         # No debe ser error de "no inicializado"
         assert "no inicializado" not in str(e).lower()
+
+def test_atomic_write(tmp_path, monkeypatch, initialized_server):
+    import os
+    import server
+    
+    def mock_replace(src, dst):
+        raise Exception("Fallo en atomicidad simulado")
+        
+    monkeypatch.setattr(os, "replace", mock_replace)
+    
+    test_note = os.path.join(initialized_server.wiki_dir, "atomic_note.md")
+    content = "Atomic content"
+    
+    with pytest.raises(Exception, match="Fallo en atomicidad simulado"):
+        server.save_note(test_note, content)
+        
+    # El archivo de destino no debió crearse (o modificarse)
+    assert not os.path.exists(test_note)
+    
+    # El archivo temporal sí debería existir
+    assert os.path.exists(test_note + ".tmp")
