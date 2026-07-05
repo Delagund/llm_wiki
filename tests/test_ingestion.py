@@ -4,6 +4,16 @@ from server import save_note, determine_scope
 from database import init_db
 from ollama_integration import OllamaTimeout
 
+VALID_FRONTMATTER = """---
+title: Test Note
+type: doc
+sources: []
+related: []
+created: 2026-07-04
+updated: 2026-07-04
+scope: local
+---
+"""
 
 def test_determine_scope():
     """Verifica que project_id se calcule correctamente relativo a wiki_dir."""
@@ -28,7 +38,7 @@ def test_save_note_happy_path(monkeypatch, initialized_server):
     project_dir = os.path.join(initialized_server.wiki_dir, "project-beta")
     os.makedirs(project_dir, exist_ok=True)
 
-    content = "---\ntitle: Test Note\nscope: local\n---\n# Header\nThis is a test."
+    content = VALID_FRONTMATTER + "# Header\nThis is a test."
     file_path = os.path.join(project_dir, "test_note.md")
 
     result = save_note(file_path, content)
@@ -59,7 +69,7 @@ def test_save_note_skip_on_same_hash(monkeypatch, initialized_server):
     project_dir = os.path.join(initialized_server.wiki_dir, "project-beta")
     os.makedirs(project_dir, exist_ok=True)
 
-    content = "Hello world"
+    content = VALID_FRONTMATTER + "Hello world"
     file_path = os.path.join(project_dir, "test_note.md")
 
     call_count = 0
@@ -83,7 +93,7 @@ def test_save_note_timeout_rollback(monkeypatch, initialized_server):
     project_dir = os.path.join(initialized_server.wiki_dir, "project-beta")
     os.makedirs(project_dir, exist_ok=True)
 
-    content = "Some text"
+    content = VALID_FRONTMATTER + "Some text"
     file_path = os.path.join(project_dir, "timeout_note.md")
 
     def mock_embed(x):

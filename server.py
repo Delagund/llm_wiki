@@ -10,8 +10,22 @@ import threading
 from dataclasses import dataclass
 from database import init_db, create_schema, VEC_AVAILABLE, DB_LOCK, ensure_schema
 from ollama_integration import get_ollama_embedding, OllamaTimeout, check_ollama_availability
-from utils.chunking_strategy import chunk_text
+from utils.chunking_strategy import chunk_text, segment_html
 from utils.logger import logger
+import re
+from html.parser import HTMLParser
+
+class StyleValidator(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.has_style = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'style':
+            self.has_style = True
+        for attr, _ in attrs:
+            if attr in ('style', 'class'):
+                self.has_style = True
 
 
 @dataclass
@@ -86,16 +100,42 @@ def require_initialized() -> ProjectConfig:
     return active_config
 
 
-def parse_frontmatter(content: str) -> tuple[dict, str]:
-    if content.startswith("---"):
-        parts = content.split("---", 2)
-        if len(parts) >= 3:
+def parse_note_content(content: str, extension: str = ".md") -> tuple[dict, str]:
+    content_stripped = content.lstrip()
+
+    def parse_md():
+        if content_stripped.startswith("---"):
+            parts = content_stripped.split("---", 2)
+            if len(parts) >= 3:
+                try:
+                    metadata = yaml.safe_load(parts[1]) or {}
+                    return metadata, parts[2].lstrip()
+                except yaml.YAMLError:
+                    pass
+        return None
+        
+    def parse_html():
+        match = re.match(r'^<!--yaml\s+(.*?)\s+-->', content_stripped, re.DOTALL)
+        if match:
             try:
-                metadata = yaml.safe_load(parts[1]) or {}
-                return metadata, parts[2].strip()
+                metadata = yaml.safe_load(match.group(1)) or {}
+                return metadata, content_stripped[match.end():].lstrip()
             except yaml.YAMLError:
                 pass
-    return {}, content.strip()
+        return None
+
+    if extension == ".html":
+        res = parse_html()
+        if res: return res
+        res = parse_md()
+        if res: return res
+    else:
+        res = parse_md()
+        if res: return res
+        res = parse_html()
+        if res: return res
+
+    return {}, content_stripped
 
 def determine_scope(file_path: str, yaml_metadata: dict, wiki_dir: str = None) -> tuple[str, int]:
     """
@@ -205,7 +245,24 @@ def save_note(file_path: str, content: str) -> dict:
             if row and row[0] == content_hash:
                 return {"status": "SKIPPED", "message": "Content hash matches existing note. Skipped."}
                 
-            yaml_meta, plain_text = parse_frontmatter(content)
+            _, ext = os.path.splitext(file_path)
+            ext = ext.lower()
+            
+            yaml_meta, plain_text = parse_note_content(content, ext)
+            
+            if ext == '.md':
+                required = ["title", "type", "sources", "related", "created", "updated"]
+                if not all(r in yaml_meta for r in required):
+                    return {"status": "FAILED", "message": "Faltan campos obligatorios en MD"}
+            elif ext == '.html':
+                if "type" not in yaml_meta:
+                    return {"status": "FAILED", "message": "Falta campo obligatorio 'type' en HTML"}
+                
+                validator = StyleValidator()
+                validator.feed(content)
+                if validator.has_style:
+                    return {"status": "FAILED", "message": "Rechazado: HTML contiene etiquetas style o atributos style/class"}
+                    
             project_id, is_global = determine_scope(file_path, yaml_meta, config.wiki_dir)
             note_id = str(uuid.uuid4())
             
@@ -227,13 +284,22 @@ def save_note(file_path: str, content: str) -> dict:
                     (note_id, file_path, title, project_id, is_global, content_hash, json.dumps(yaml_meta, default=str))
                 )
                 
-                chunks = chunk_text(plain_text)
+                if ext == '.html':
+                    segments = segment_html(plain_text)
+                    chunks = []
+                    for text_seg, sec_id in segments:
+                        for c in chunk_text(text_seg):
+                            chunks.append((c, sec_id))
+                else:
+                    md_chunks = chunk_text(plain_text)
+                    chunks = [(c, None) for c in md_chunks]
+                    
                 t2 = time.perf_counter()
-                for idx, chunk in enumerate(chunks):
+                for idx, (chunk, sec_id) in enumerate(chunks):
                     vector = get_ollama_embedding(chunk)
                     cursor.execute(
-                        "INSERT INTO document_chunks (note_id, chunk_index, content) VALUES (?, ?, ?)",
-                        (note_id, idx, chunk)
+                        "INSERT INTO document_chunks (note_id, chunk_index, content, section_id) VALUES (?, ?, ?, ?)",
+                        (note_id, idx, chunk, sec_id)
                     )
                     chunk_id = cursor.lastrowid
                     

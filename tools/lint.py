@@ -22,44 +22,69 @@ def extract_wikilinks(content: str) -> list[str]:
         links.append(normalize_link(raw_link))
     return links
 
-def scan_markdown_files(directory: str) -> list[str]:
-    """Return list of absolute paths to .md files."""
-    md_files = []
+def scan_note_files(directory: str) -> list[str]:
+    """Return list of absolute paths to .md and .html files."""
+    note_files = []
     for root, _, files in os.walk(directory):
         for f in files:
-            if f.endswith('.md'):
-                md_files.append(os.path.join(root, f))
-    return md_files
+            if f.endswith('.md') or f.endswith('.html'):
+                note_files.append(os.path.join(root, f))
+    return note_files
 
 def validate_kebab_case(name: str) -> bool:
     return bool(re.match(r'^[a-z0-9]+(-[a-z0-9]+)*$', name))
 
-def parse_frontmatter(content: str):
-    """Parse YAML frontmatter and validate strictly."""
-    if not content.startswith('---'):
-        return False, ["Falta el bloque de inicio de YAML (---) en la primera línea."], None
+def parse_note_content(content: str, extension: str = ".md"):
+    """Parse YAML frontmatter or HTML comment YAML."""
+    content_stripped = content.lstrip()
 
-    parts = content.split('---', 2)
-    if len(parts) < 3:
-        return False, ["Falta el bloque de cierre de YAML (---)."], None
+    def parse_md():
+        if content_stripped.startswith("---"):
+            parts = content_stripped.split("---", 2)
+            if len(parts) >= 3:
+                try:
+                    data = yaml.safe_load(parts[1]) or {}
+                    return data, parts[2].lstrip(), None
+                except Exception as e:
+                    return None, None, [f"Error de parseo YAML: {e}"]
+        return None, None, ["Falta el bloque de YAML."]
+        
+    def parse_html():
+        match = re.match(r'^<!--yaml\s+(.*?)\s+-->', content_stripped, re.DOTALL)
+        if match:
+            try:
+                data = yaml.safe_load(match.group(1)) or {}
+                return data, content_stripped[match.end():].lstrip(), None
+            except Exception as e:
+                return None, None, [f"Error de parseo YAML: {e}"]
+        return None, None, ["Falta el bloque YAML en HTML."]
 
-    yaml_text = parts[1]
-    try:
-        data = yaml.safe_load(yaml_text)
-    except Exception as e:
-        return False, [f"Error de parseo YAML: {e}"], None
+    if extension == ".html":
+        data, remaining, err = parse_html()
+        if data is not None: return data, remaining, err
+        data, remaining, err = parse_md()
+        if data is not None: return data, remaining, err
+    else:
+        data, remaining, err = parse_md()
+        if data is not None: return data, remaining, err
+        data, remaining, err = parse_html()
+        if data is not None: return data, remaining, err
 
-    if not isinstance(data, dict):
-        return False, ["El frontmatter no es un diccionario válido."], None
+    return None, None, ["No se encontró un bloque de metadatos válido."]
 
+def validate_metadata(data, extension=".md"):
     errors = []
-    required_fields = ["title", "type", "sources", "related", "created", "updated"]
+    if not isinstance(data, dict):
+        return ["El frontmatter no es un diccionario válido."], None
+    
+    if extension == '.md':
+        required_fields = ["title", "type", "sources", "related", "created", "updated"]
+    else:
+        required_fields = ["type"]
+        
     for req in required_fields:
         if req not in data:
             errors.append(f"Campo obligatorio faltante: '{req}'.")
-
-    if errors:
-        return False, errors, None
 
     # Validate type
     valid_types = ["concept", "entity", "source-summary", "comparison"]
@@ -90,7 +115,7 @@ def parse_frontmatter(content: str):
     elif not data.get("related"):
         data["related"] = []
 
-    return len(errors) == 0, errors, data
+    return errors, data
 
 def main():
     args = sys.argv
@@ -100,9 +125,9 @@ def main():
 
     print(f"Iniciando auditoría estricta (lint) del Wiki en: {wiki_dir}...")
     
-    md_files = scan_markdown_files(wiki_dir)
+    md_files = scan_note_files(wiki_dir)
     if not md_files:
-        print("⚠️ No se encontraron archivos Markdown (.md) en el directorio 'wiki/'.")
+        print("⚠️ No se encontraron archivos (.md o .html) en el directorio 'wiki/'.")
         return
         
     errors = []
@@ -116,8 +141,9 @@ def main():
         
     for file_path in md_files:
         relative_path = os.path.relpath(file_path, current_dir)
-        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        base_name, ext = os.path.splitext(os.path.basename(file_path))
         base_name_lower = base_name.lower()
+        ext = ext.lower()
         
         try:
             with open(file_path, "r", encoding="utf-8") as f:
@@ -128,13 +154,18 @@ def main():
             
         if True:
             if not validate_kebab_case(base_name):
-                errors.append({"file": relative_path, "msg": f"Nombre de archivo inválido: '{base_name}.md'. Debe estar en kebab-case estricto."})
+                errors.append({"file": relative_path, "msg": f"Nombre de archivo inválido: '{base_name}{ext}'. Debe estar en kebab-case estricto."})
                 
-            is_valid, validation_errors, parsed_data = parse_frontmatter(content)
-            if not is_valid:
-                for err in validation_errors:
+            data, _, parse_err = parse_note_content(content, ext)
+            if parse_err:
+                for err in parse_err:
                     errors.append({"file": relative_path, "msg": f"YAML Frontmatter inválido: {err}"})
-            elif parsed_data:
+            elif data is not None:
+                validation_errors, parsed_data = validate_metadata(data, ext)
+                if validation_errors:
+                    for err in validation_errors:
+                        errors.append({"file": relative_path, "msg": f"Metadata inválida: {err}"})
+                        
                 title = parsed_data.get("title")
                 if title:
                     norm_title = normalize_link(title)

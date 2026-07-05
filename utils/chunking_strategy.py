@@ -1,4 +1,62 @@
 import re
+from html.parser import HTMLParser
+
+class ArticleParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.segments = []
+        self.tag_stack = []
+        self.current_text = []
+
+    def current_section_path(self):
+        ids = [id_val for _, id_val in self.tag_stack if id_val is not None]
+        return ";".join(ids) if ids else "article"
+
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs)
+        tag_id = attrs_dict.get('id')
+        
+        if tag_id:
+            text = "".join(self.current_text).strip()
+            if text:
+                self.segments.append((text, self.current_section_path()))
+            self.current_text = []
+            
+        self.tag_stack.append((tag, tag_id))
+
+    def handle_endtag(self, tag):
+        for i in range(len(self.tag_stack)-1, -1, -1):
+            if self.tag_stack[i][0] == tag:
+                tag_id = self.tag_stack[i][1]
+                if tag_id:
+                    text = "".join(self.current_text).strip()
+                    if text:
+                        self.segments.append((text, self.current_section_path()))
+                    self.current_text = []
+                
+                self.tag_stack = self.tag_stack[:i]
+                break
+
+    def handle_data(self, data):
+        if data.strip():
+            self.current_text.append(data)
+
+def segment_html(content: str) -> list[tuple[str, str]]:
+    """Segmenta HTML en tuplas (texto_limpio, section_id)."""
+    parser = ArticleParser()
+    parser.feed(content)
+    
+    text = "".join(parser.current_text).strip()
+    if text:
+        parser.segments.append((text, parser.current_section_path()))
+        
+    if not parser.segments:
+        stripped = content.strip()
+        if stripped:
+            return [(stripped, "article")]
+        return []
+        
+    return parser.segments
 
 def chunk_text(text: str, max_chars: int = 2000, overlap_chars: int = 200) -> list[str]:
     """

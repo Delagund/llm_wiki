@@ -1,7 +1,7 @@
 import pytest
 import os
 import json
-from server import save_note, search_wiki, get_ingestion_status, list_notes, initialize_project
+from server import save_note, search_wiki, get_ingestion_status, list_notes, initialize_project, parse_note_content
 from ollama_integration import get_ollama_embedding, OllamaTimeout
 import requests
 
@@ -204,3 +204,67 @@ def test_atomic_write(tmp_path, monkeypatch, initialized_server):
     
     # El archivo temporal sí debería existir
     assert os.path.exists(test_note + ".tmp")
+
+# ============================================================================
+# Tests TDD — Fase 3
+# ============================================================================
+
+def test_parse_note_content_hibrido():
+    html_yaml = "<!--yaml\ntitle: hola\n-->\n<p>texto</p>"
+    html_md = "---\ntitle: hola\n---\n<p>texto</p>"
+    
+    metadata, plain = parse_note_content(html_yaml, ".html")
+    assert metadata.get("title") == "hola"
+    assert plain == "<p>texto</p>"
+    
+    metadata2, plain2 = parse_note_content(html_md, ".html")
+    assert metadata2.get("title") == "hola"
+    assert plain2 == "<p>texto</p>"
+    
+    md_md = "---\ntitle: md\n---\n# texto"
+    md_html = "<!--yaml\ntitle: md\n-->\n# texto"
+    
+    metadata3, plain3 = parse_note_content(md_md, ".md")
+    assert metadata3.get("title") == "md"
+    assert plain3 == "# texto"
+    
+    metadata4, plain4 = parse_note_content(md_html, ".md")
+    assert metadata4.get("title") == "md"
+    assert plain4 == "# texto"
+
+def test_yaml_metadata_flexibility(monkeypatch, tmp_path, initialized_server):
+    import server
+    import os
+    monkeypatch.setattr("server.get_ollama_embedding", lambda x: [0.1] * 768)
+    
+    html_inc = os.path.join(initialized_server.wiki_dir, "inc.html")
+    res1 = server.save_note(html_inc, "<!--yaml\ntitle: t\n-->\n<p>p</p>")
+    assert res1["status"] == "FAILED"
+    assert "type" in res1["message"].lower()
+    
+    html_ok = os.path.join(initialized_server.wiki_dir, "ok.html")
+    res2 = server.save_note(html_ok, "<!--yaml\ntype: concept\n-->\n<p>p</p>")
+    assert res2["status"] == "SUCCESS"
+    
+    md_inc = os.path.join(initialized_server.wiki_dir, "inc.md")
+    res3 = server.save_note(md_inc, "---\ntype: concept\n---\n# h1")
+    assert res3["status"] == "FAILED"
+    assert "faltan campos obligatorios" in res3["message"].lower()
+
+def test_style_attributes_rejection(monkeypatch, initialized_server):
+    import server
+    import os
+    monkeypatch.setattr("server.get_ollama_embedding", lambda x: [0.1] * 768)
+    
+    file_path = os.path.join(initialized_server.wiki_dir, "test.html")
+    
+    res1 = server.save_note(file_path, "<!--yaml\ntype: doc\n-->\n<div class=\"btn\">t</div>")
+    assert res1["status"] == "FAILED"
+    assert "rechazado" in res1["message"].lower()
+    
+    res2 = server.save_note(file_path, "<!--yaml\ntype: doc\n-->\n<style>body{}</style>")
+    assert res2["status"] == "FAILED"
+    assert "rechazado" in res2["message"].lower()
+    
+    res3 = server.save_note(file_path, "<!--yaml\ntype: doc\n-->\n<div>t</div>")
+    assert res3["status"] == "SUCCESS"
