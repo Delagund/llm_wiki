@@ -201,6 +201,45 @@ def test_initialize_project_tool(monkeypatch, tmp_path):
         # No debe ser error de "no inicializado"
         assert "no inicializado" not in str(e).lower()
 
+def test_require_initialized_returns_config(initialized_server):
+    from server import require_initialized
+    config = require_initialized()
+    assert config is not None
+    assert config.wiki_dir == initialized_server.wiki_dir
+
+
+def test_require_initialized_raises_on_none(monkeypatch):
+    import server
+    monkeypatch.setattr(server, "active_config", None)
+    with pytest.raises(ValueError, match="no inicializado"):
+        server.require_initialized()
+
+
+def test_concurrent_require_initialized(initialized_server):
+    import threading
+    import server
+
+    errors = []
+    err_lock = threading.Lock()
+
+    def read_config():
+        try:
+            config = server.require_initialized()
+            assert config is not None
+            assert config.wiki_dir == initialized_server.wiki_dir
+        except Exception as e:
+            with err_lock:
+                errors.append(e)
+
+    threads = [threading.Thread(target=read_config) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(errors) == 0, f"Concurrent reads failed: {errors}"
+
+
 def test_atomic_write(tmp_path, monkeypatch, initialized_server):
     import os
     import server
@@ -230,22 +269,22 @@ def test_parse_note_content_hibrido():
     html_yaml = "<!--yaml\ntitle: hola\n-->\n<p>texto</p>"
     html_md = "---\ntitle: hola\n---\n<p>texto</p>"
     
-    metadata, plain = parse_note_content(html_yaml, ".html")
+    metadata, plain, _ = parse_note_content(html_yaml, ".html")
     assert metadata.get("title") == "hola"
     assert plain == "<p>texto</p>"
     
-    metadata2, plain2 = parse_note_content(html_md, ".html")
+    metadata2, plain2, _ = parse_note_content(html_md, ".html")
     assert metadata2.get("title") == "hola"
     assert plain2 == "<p>texto</p>"
     
     md_md = "---\ntitle: md\n---\n# texto"
     md_html = "<!--yaml\ntitle: md\n-->\n# texto"
     
-    metadata3, plain3 = parse_note_content(md_md, ".md")
+    metadata3, plain3, _ = parse_note_content(md_md, ".md")
     assert metadata3.get("title") == "md"
     assert plain3 == "# texto"
     
-    metadata4, plain4 = parse_note_content(md_html, ".md")
+    metadata4, plain4, _ = parse_note_content(md_html, ".md")
     assert metadata4.get("title") == "md"
     assert plain4 == "# texto"
 

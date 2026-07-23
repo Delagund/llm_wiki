@@ -2,18 +2,20 @@ from fastmcp import FastMCP
 import os
 import json
 import hashlib
-import yaml
 import uuid
 import struct
 import time
 import threading
 from dataclasses import dataclass
-from database import init_db, create_schema, VEC_AVAILABLE, DB_LOCK, ensure_schema
+from database import init_db, create_schema, VEC_AVAILABLE, VEC_AVAILABLE_LOCK, DB_LOCK, ensure_schema
 from ollama_integration import get_ollama_embedding, OllamaTimeout, check_ollama_availability
 from utils.chunking_strategy import chunk_text, segment_html, strip_markdown
+from utils.frontmatter import parse_note_content
 from utils.logger import logger
 import re
 from html.parser import HTMLParser
+
+RRF_K = 60.0  # ponytail: RRF constant, tune per corpus if relevance metrics demand it
 
 class StyleValidator(HTMLParser):
     def __init__(self):
@@ -55,6 +57,7 @@ class ProjectConfig:
 
 # Configuración activa compartida por las herramientas MCP en runtime
 active_config: ProjectConfig | None = None
+_config_lock = threading.Lock()
 
 mcp = FastMCP("llm-wiki-mcp")
 
@@ -126,53 +129,14 @@ def validate_path_sandbox(file_path: str, allowed_base: str) -> str:
 
 
 def require_initialized() -> ProjectConfig:
-    """
-    Guard que verifica que el servidor esté inicializado.
-    Lanza ValueError si active_config es None.
-    """
-    if active_config is None:
+    with _config_lock:
+        config = active_config
+    if config is None:
         raise ValueError(
             "Servidor no inicializado. Use initialize_project(base_path) para configurar."
         )
-    return active_config
+    return config
 
-
-def parse_note_content(content: str, extension: str = ".md") -> tuple[dict, str]:
-    content_stripped = content.lstrip()
-
-    def parse_md():
-        if content_stripped.startswith("---"):
-            parts = content_stripped.split("---", 2)
-            if len(parts) >= 3:
-                try:
-                    metadata = yaml.safe_load(parts[1]) or {}
-                    return metadata, parts[2].lstrip()
-                except yaml.YAMLError:
-                    pass
-        return None
-        
-    def parse_html():
-        match = re.match(r'^<!--yaml\s+(.*?)\s+-->', content_stripped, re.DOTALL)
-        if match:
-            try:
-                metadata = yaml.safe_load(match.group(1)) or {}
-                return metadata, content_stripped[match.end():].lstrip()
-            except yaml.YAMLError:
-                pass
-        return None
-
-    if extension == ".html":
-        res = parse_html()
-        if res: return res
-        res = parse_md()
-        if res: return res
-    else:
-        res = parse_md()
-        if res: return res
-        res = parse_html()
-        if res: return res
-
-    return {}, content_stripped
 
 def determine_scope(file_path: str, yaml_metadata: dict, wiki_dir: str = None) -> tuple[str, int]:
     """
@@ -192,7 +156,7 @@ def determine_scope(file_path: str, yaml_metadata: dict, wiki_dir: str = None) -
         parts = file_path.split(os.sep)
         project_id = parts[-2] if len(parts) > 1 else "default"
 
-    is_global = 1 if yaml_metadata.get("scope") == "global" or "global" in file_path.lower() else 0
+    is_global = 1 if yaml_metadata.get("scope") == "global" else 0
     return project_id, is_global
 
 def serialize_f32(vector: list[float]) -> bytes:
@@ -209,12 +173,10 @@ def initialize_project(base_path: str) -> dict:
 
     base_path = os.path.abspath(base_path)
 
-    # Seguridad: no permitir inicializar en la raiz del sistema (excepto en modo test)
     is_test_mode = os.environ.get("LLM_WIKI_TEST_MODE") == "true"
     if not is_test_mode and base_path == os.sep:
         raise ValueError("No se permite inicializar en la raiz del sistema de archivos")
 
-    # Crear estructura de directorios
     dirs_to_create = [
         os.path.join(base_path, "wiki", "concepts"),
         os.path.join(base_path, "wiki", "entities"),
@@ -225,11 +187,9 @@ def initialize_project(base_path: str) -> dict:
     for d in dirs_to_create:
         os.makedirs(d, exist_ok=True)
 
-    # Crear base de datos con esquema
     db_path = os.path.join(base_path, "wiki.db")
     ensure_schema(db_path)
 
-    # Escribir configuracion local
     config_data = {
         "wiki_dir": os.path.join(base_path, "wiki"),
         "sources_dir": os.path.join(base_path, "sources")
@@ -238,12 +198,12 @@ def initialize_project(base_path: str) -> dict:
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config_data, f, indent=2)
 
-    # Activar configuracion en runtime sin necesidad de reiniciar
-    active_config = ProjectConfig(
-        wiki_dir=config_data["wiki_dir"],
-        sources_dir=config_data["sources_dir"],
-        db_path=db_path
-    )
+    with _config_lock:
+        active_config = ProjectConfig(
+            wiki_dir=config_data["wiki_dir"],
+            sources_dir=config_data["sources_dir"],
+            db_path=db_path
+        )
 
     logger.info({"base_path": base_path, "db_path": db_path}, "Proyecto inicializado exitosamente")
 
@@ -261,6 +221,7 @@ def save_note(file_path: str, content: str) -> dict:
     """
     Ingesta una nota con embeddings. Extrae metadata YAML, asigna project_id e is_global,
     segmenta el texto, genera embeddings (con timeout) y persiste atómicamente.
+    # ponytail: ~140 lines, 16 sub-steps. SRP refactor (A-02) deferred — no operational bug.
     """
     config = require_initialized()
     file_path = validate_path_sandbox(file_path, config.wiki_dir)
@@ -285,7 +246,9 @@ def save_note(file_path: str, content: str) -> dict:
             _, ext = os.path.splitext(file_path)
             ext = ext.lower()
             
-            yaml_meta, plain_text = parse_note_content(content, ext)
+            yaml_meta, plain_text, _ = parse_note_content(content, ext)
+            if yaml_meta is None:
+                yaml_meta, plain_text = {}, content.lstrip()
 
             # Strip markdown syntax for cleaner indexing (only affects chunking, not file on disk)
             if ext == '.md':
@@ -344,7 +307,9 @@ def save_note(file_path: str, content: str) -> dict:
                     )
                     chunk_id = cursor.lastrowid
                     
-                    if VEC_AVAILABLE:
+                    with VEC_AVAILABLE_LOCK:
+                        vec_ok = VEC_AVAILABLE
+                    if vec_ok:
                         cursor.execute(
                             "INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?, ?)",
                             (chunk_id, serialize_f32(vector))
@@ -407,7 +372,7 @@ def sanitize_fts_query(query: str) -> str:
     """
     if not query:
         return ""
-    cleaned = "".join(c for c in query if c.isalnum() or c.isspace() or c in ("-", "_"))
+    cleaned = "".join(c for c in query if c.isalnum() or c.isspace() or c in ("-", "_", "*", '"'))
     return " ".join(cleaned.split())
 
 
@@ -418,6 +383,7 @@ def search_wiki(query: str, current_project: str = None, limit: int = 5, scoping
     Explicación: Si Ollama está disponible, ejecuta tanto búsqueda semántica como léxica,
     filtrando por proyecto y fusionando resultados usando Reciprocal Rank Fusion (RRF).
     Si Ollama no está disponible o falla, degrada a búsqueda léxica únicamente.
+    # ponytail: returns str for now (A-03). Switch to list[dict] when an MCP client needs structured data.
     """
     t0 = time.perf_counter()
     config = require_initialized()
@@ -429,7 +395,9 @@ def search_wiki(query: str, current_project: str = None, limit: int = 5, scoping
     query_vector = None
 
     # Explicación: Se chequea la disponibilidad de Ollama una única vez para evitar timeouts repetitivos
-    if VEC_AVAILABLE and check_ollama_availability():
+    with VEC_AVAILABLE_LOCK:
+        vec_ok = VEC_AVAILABLE
+    if vec_ok and check_ollama_availability():
         try:
             # Explicación: Timeout ajustado a 2s para búsquedas interactivas ágiles
             query_vector = get_ollama_embedding(query, timeout=2.0)
@@ -467,7 +435,7 @@ def search_wiki(query: str, current_project: str = None, limit: int = 5, scoping
                     continue
                 chunk_id = row[4]
                 # row: (content, title, is_global, distance, id, section_id)
-                rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + (1.0 / (60.0 + rank + 1))
+                rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + (1.0 / (RRF_K + rank + 1))
                 chunks_metadata[chunk_id] = (row[0], row[1], row[2], f"Distancia: {row[3]:.4f}", row[5])
 
         # 2. Recuperación Léxica (FTS5)
@@ -493,7 +461,7 @@ def search_wiki(query: str, current_project: str = None, limit: int = 5, scoping
             for rank, row in enumerate(fts_results):
                 chunk_id = row[3]
                 # row: (content, title, is_global, id, section_id)
-                rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + (1.0 / (60.0 + rank + 1))
+                rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + (1.0 / (RRF_K + rank + 1))
                 if chunk_id not in chunks_metadata:
                     chunks_metadata[chunk_id] = (row[0], row[1], row[2], "FTS5 Léxico", row[4])
 
@@ -588,14 +556,16 @@ def startup_lazy_check():
     """
     Sincronizacion en frio: escanea wiki/ y actualiza archivos modificados.
     """
-    if active_config is None:
+    try:
+        config = require_initialized()
+    except ValueError:
         return
 
-    wiki_dir = active_config.wiki_dir
+    wiki_dir = config.wiki_dir
     if not os.path.exists(wiki_dir):
         return
 
-    with init_db(active_config.db_path) as conn:
+    with init_db(config.db_path) as conn:
         cursor = conn.cursor()
 
         for root, _, files in os.walk(wiki_dir):
@@ -634,8 +604,8 @@ def startup_lazy_check():
 
 
     # T4.4: Ingesta de sources/ — autogenerar resúmenes para archivos crudos
-    sources_dir = active_config.sources_dir
-    wiki_sources_dir = os.path.join(active_config.wiki_dir, "sources")
+    sources_dir = config.sources_dir
+    wiki_sources_dir = os.path.join(config.wiki_dir, "sources")
     if sources_dir and os.path.exists(sources_dir):
         os.makedirs(wiki_sources_dir, exist_ok=True)
         for entry in os.listdir(sources_dir):
@@ -666,7 +636,9 @@ def main_run():
     t0 = time.perf_counter()
 
     # Cargar configuracion con prioridad: env > JSON > None
-    active_config = load_config()
+    loaded_config = load_config()
+    with _config_lock:
+        active_config = loaded_config
 
     if active_config:
         ensure_schema(active_config.db_path)
@@ -704,33 +676,36 @@ def main_run():
 
     mcp.run()
 
+
+def cli_ingest(file_paths: list[str]) -> int:
+    active_config = load_config()
+    if active_config is None:
+        print("Error: Servidor no inicializado. Configure LLM_WIKI_DIR o ejecute initialize_project.")
+        return 1
+
+    for file_path in file_paths:
+        abs_path = os.path.abspath(file_path)
+        if os.path.exists(abs_path):
+            try:
+                validate_path_sandbox(abs_path, active_config.wiki_dir)
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                logger.info({"file": abs_path}, "Manual CLI ingestion triggered")
+                print(f"Ingesting {abs_path}...")
+                print(save_note(abs_path, content))
+            except ValueError as e:
+                print(f"Security error: {e}")
+            except Exception as e:
+                logger.error({"file": abs_path, "error": str(e)}, "Manual ingestion failed")
+                print(f"Failed to ingest {abs_path}: {e}")
+        else:
+            logger.error({"file": file_path}, "File not found for CLI ingest")
+            print(f"File not found: {file_path}")
+    return 0
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "--ingest":
-        # Cargar configuracion para CLI
-        active_config = load_config()
-        if active_config is None:
-            print("Error: Servidor no inicializado. Configure LLM_WIKI_DIR o ejecute initialize_project.")
-            sys.exit(1)
-
-        for file_path in sys.argv[2:]:
-            abs_path = os.path.abspath(file_path)
-            if os.path.exists(abs_path):
-                try:
-                    validate_path_sandbox(abs_path, active_config.wiki_dir)
-                    with open(abs_path, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    logger.info({"file": abs_path}, "Manual CLI ingestion triggered")
-                    print(f"Ingesting {abs_path}...")
-                    print(save_note(abs_path, content))
-                except ValueError as e:
-                    print(f"Security error: {e}")
-                except Exception as e:
-                    logger.error({"file": abs_path, "error": str(e)}, "Manual ingestion failed")
-                    print(f"Failed to ingest {abs_path}: {e}")
-            else:
-                logger.error({"file": file_path}, "File not found for CLI ingest")
-                print(f"File not found: {file_path}")
-        sys.exit(0)
-
+        sys.exit(cli_ingest(sys.argv[2:]))
     main_run()

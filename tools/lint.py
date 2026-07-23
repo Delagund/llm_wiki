@@ -2,11 +2,11 @@
 import os
 import sys
 import re
-import yaml
 import unicodedata
 import subprocess
 from datetime import datetime
 from html.parser import HTMLParser
+from utils.frontmatter import parse_note_content
 
 class LintHTMLParser(HTMLParser):
     def __init__(self):
@@ -87,44 +87,6 @@ def scan_note_files(directory: str) -> list[str]:
 
 def validate_kebab_case(name: str) -> bool:
     return bool(re.match(r'^[a-z0-9]+(-[a-z0-9]+)*$', name))
-
-def parse_note_content(content: str, extension: str = ".md"):
-    """Parse YAML frontmatter or HTML comment YAML."""
-    content_stripped = content.lstrip()
-
-    def parse_md():
-        if content_stripped.startswith("---"):
-            parts = content_stripped.split("---", 2)
-            if len(parts) >= 3:
-                try:
-                    data = yaml.safe_load(parts[1]) or {}
-                    return data, parts[2].lstrip(), None
-                except Exception as e:
-                    return None, None, [f"Error de parseo YAML: {e}"]
-        return None, None, ["Falta el bloque de YAML."]
-        
-    def parse_html():
-        match = re.match(r'^<!--yaml\s+(.*?)\s+-->', content_stripped, re.DOTALL)
-        if match:
-            try:
-                data = yaml.safe_load(match.group(1)) or {}
-                return data, content_stripped[match.end():].lstrip(), None
-            except Exception as e:
-                return None, None, [f"Error de parseo YAML: {e}"]
-        return None, None, ["Falta el bloque YAML en HTML."]
-
-    if extension == ".html":
-        data, remaining, err = parse_html()
-        if data is not None: return data, remaining, err
-        data, remaining, err = parse_md()
-        if data is not None: return data, remaining, err
-    else:
-        data, remaining, err = parse_md()
-        if data is not None: return data, remaining, err
-        data, remaining, err = parse_html()
-        if data is not None: return data, remaining, err
-
-    return None, None, ["No se encontró un bloque de metadatos válido."]
 
 def validate_metadata(data, extension=".md"):
     errors = []

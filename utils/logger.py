@@ -3,9 +3,10 @@ import json
 import os
 import sys
 
-DB_DIR = os.path.expanduser("~/.config/mcp-wiki")
-os.makedirs(DB_DIR, exist_ok=True)
-LOG_FILE = os.path.join(DB_DIR, "mcp-wiki.log")
+BASE = os.environ.get("LLM_WIKI_DIR") or os.path.expanduser("~/.config/mcp-wiki")
+LOG_DIR = os.path.join(BASE, "logs") if os.environ.get("LLM_WIKI_DIR") else BASE
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "mcp-wiki.log")
 
 # Configurar logger raíz para registrar en archivo y stderr
 root_logger = logging.getLogger()

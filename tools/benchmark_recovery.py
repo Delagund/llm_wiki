@@ -28,6 +28,7 @@ def main():
 
         # Mock Ollama to avoid real HTTP calls
         import server as srv_mod
+        import ollama_integration
         monkeypatch_get_embedding = lambda x: [0.1] * 768
 
         # Initialize project
@@ -90,12 +91,15 @@ title: "html-note-{i}"
 
         # Temporarily set active_config and mock embedding
         real_embed = srv_mod.get_ollama_embedding
+        real_embed_orig = ollama_integration.get_ollama_embedding
         srv_mod.get_ollama_embedding = monkeypatch_get_embedding
+        ollama_integration.get_ollama_embedding = monkeypatch_get_embedding
 
         try:
             startup_lazy_check()
         finally:
             srv_mod.get_ollama_embedding = real_embed
+            ollama_integration.get_ollama_embedding = real_embed_orig
 
         elapsed = time.perf_counter() - t0
         limit = 300.0  # 5 minutes

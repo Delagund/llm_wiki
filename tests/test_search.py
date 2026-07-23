@@ -68,18 +68,9 @@ def test_search_wiki_global_knowledge(monkeypatch, initialized_server):
     # Nota global marcada por frontmatter scope: global
     save_note(os.path.join(shared_dir, "pattern.md"), make_md("Singleton pattern is great.", scope="global", title="pattern"))
 
-    # Nota local: el path de pytest puede contener 'global' en el nombre del tmpdir,
-    # lo cual activa el heurístico "global in file_path". Se fuerza is_global=0 verificando
-    # el resultado directamente en la BD.
+    # Nota local con scope local (ya no hay heurístico de path)
     local_path = os.path.join(beta_dir, "local.md")
     save_note(local_path, make_md("Local config for beta.", scope="local", title="local"))
-
-    # Corregir is_global en la nota local si el heurístico del path la marcó incorrectamente
-    from database import init_db
-    conn = init_db(initialized_server.db_path)
-    conn.execute("UPDATE notes SET is_global = 0 WHERE file_path = ?", (local_path,))
-    conn.commit()
-    conn.close()
 
     result = search_wiki("pattern", current_project="project-beta")
     assert "Singleton pattern is great." in result

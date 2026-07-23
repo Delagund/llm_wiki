@@ -18,6 +18,7 @@ uv.lock
 # ---------------------------------------------------
 .agents/
 .claude/
+.opencode/
 .obsidian/
 data_only/
 

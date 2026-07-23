@@ -1,6 +1,8 @@
 import sqlite3
 import os
+import shutil
 import threading
+from datetime import datetime
 
 try:
     import sqlite_vec
@@ -9,6 +11,7 @@ except ImportError:
     VEC_AVAILABLE = False
 
 DB_LOCK = threading.RLock()
+VEC_AVAILABLE_LOCK = threading.Lock()
 SCHEMA_VERSION = 1
 
 def init_db(db_path: str, timeout: float = 10.0) -> sqlite3.Connection:
@@ -21,12 +24,15 @@ def init_db(db_path: str, timeout: float = 10.0) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys = ON;")
     
-    if VEC_AVAILABLE:
+    with VEC_AVAILABLE_LOCK:
+        vec_ok = VEC_AVAILABLE
+    if vec_ok:
         try:
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
         except Exception:
-            VEC_AVAILABLE = False
+            with VEC_AVAILABLE_LOCK:
+                VEC_AVAILABLE = False
             
     return conn
 
@@ -75,7 +81,9 @@ def create_schema(conn: sqlite3.Connection):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_chunks_section ON document_chunks(section_id);")
 
     # 3. Tabla Virtual Vectorial (Provista por sqlite-vec)
-    if VEC_AVAILABLE:
+    with VEC_AVAILABLE_LOCK:
+        vec_ok = VEC_AVAILABLE
+    if vec_ok:
         embed_dims = int(os.getenv("OLLAMA_EMBED_DIMS", "768"))
         cursor.execute(f"""
         CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
@@ -85,6 +93,9 @@ def create_schema(conn: sqlite3.Connection):
         """)
 
     # 4. Tabla de Búsqueda de Texto Completo (Provista por FTS5)
+    # ponytail: standalone FTS5 (not external content) for simplicity.
+    # External content avoids JOIN but needs rebuild post-insert and a v2 migration.
+    # Upgrade path (A-04): CREATE VIRTUAL TABLE ... USING fts5(content, content=document_chunks, content_rowid=id)
     cursor.execute("""
     CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(
         chunk_id UNINDEXED,
@@ -106,30 +117,50 @@ def create_schema(conn: sqlite3.Connection):
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
     conn.commit()
 
+_MIGRATIONS = [
+    None,
+    create_schema,
+]
+
 def ensure_schema(db_path: str):
-    """
-    Asegura que el esquema de la base de datos esté actualizado.
-    Si la versión es menor a SCHEMA_VERSION, recrea la base de datos.
-    """
     version = 0
+    corrupt = False
     if os.path.exists(db_path):
         try:
             conn = sqlite3.connect(db_path, timeout=5.0)
             cursor = conn.cursor()
-            cursor.execute("PRAGMA user_version;")
+            cursor.execute("PRAGMA integrity_check;")
             row = cursor.fetchone()
-            version = row[0] if row else 0
+            if row[0] != "ok":
+                corrupt = True
+            else:
+                cursor.execute("PRAGMA user_version;")
+                row = cursor.fetchone()
+                version = row[0] if row else 0
             conn.close()
         except Exception:
-            version = 0
+            corrupt = True
 
-    if version < SCHEMA_VERSION:
+    if corrupt:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if os.path.exists(db_path):
+            shutil.copy2(db_path, f"{db_path}.corrupted.{timestamp}")
         for ext in ["", "-wal", "-shm"]:
             try:
                 os.remove(db_path + ext)
             except FileNotFoundError:
                 pass
-        
-        # Conecta de nuevo para crear la BD y su esquema
         with init_db(db_path) as conn:
             create_schema(conn)
+        return
+
+    if version >= SCHEMA_VERSION:
+        return
+
+    with init_db(db_path) as conn:
+        for target_version in range(version + 1, SCHEMA_VERSION + 1):
+            migration = _MIGRATIONS[target_version]
+            if migration:
+                migration(conn)
+            conn.execute(f"PRAGMA user_version = {target_version};")
+            conn.commit()
