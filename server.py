@@ -99,19 +99,14 @@ def validate_path_sandbox(file_path: str, allowed_base: str) -> str:
     Valida que la ruta resuelta esté dentro del directorio base permitido.
     Previene ataques de Path Traversal usando os.path.abspath.
     """
-    # Determinamos si la ruta proporcionada es relativa para aplicar las reglas de resolución.
-    # Esto es necesario para dar flexibilidad al cliente al pasar rutas como 'wiki/archivo.md' o 'archivo.md'.
     if not os.path.isabs(file_path):
         normalized = os.path.normpath(file_path)
         parts = normalized.split(os.sep)
         first_component = parts[0] if parts else ""
-        
+
         allowed_base_normalized = os.path.normpath(allowed_base)
         allowed_base_name = os.path.basename(allowed_base_normalized)
-        
-        # Si el primer componente coincide con el nombre del directorio base, se asume que
-        # la ruta relativa parte desde el directorio padre del base (raíz del proyecto).
-        # Esto evita resolver rutas erróneas como '/ruta/al/proyecto/wiki/wiki/archivo.md'.
+
         if first_component == allowed_base_name:
             parent_base = os.path.dirname(allowed_base_normalized)
             resolved = os.path.abspath(os.path.join(parent_base, normalized))
@@ -217,6 +212,20 @@ def initialize_project(base_path: str) -> dict:
 
 
 @mcp.tool()
+def get_wiki_config() -> dict:
+    """
+    Devuelve la configuración actual del servidor: wiki_dir, sources_dir y db_path.
+    El agente debe usar esta información para construir rutas absolutas al llamar a save_note.
+    """
+    config = require_initialized()
+    return {
+        "wiki_dir": config.wiki_dir,
+        "sources_dir": config.sources_dir,
+        "db_path": config.db_path
+    }
+
+
+@mcp.tool()
 def save_note(file_path: str, content: str) -> dict:
     """
     Ingesta una nota con embeddings. Extrae metadata YAML, asigna project_id e is_global,
@@ -225,6 +234,8 @@ def save_note(file_path: str, content: str) -> dict:
     """
     config = require_initialized()
     file_path = validate_path_sandbox(file_path, config.wiki_dir)
+
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
     tmp_path = file_path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
