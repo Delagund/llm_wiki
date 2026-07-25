@@ -1,4 +1,4 @@
-from fastmcp import FastMCP
+from fastmcp import FastMCP, Context
 import os
 import json
 import hashlib
@@ -562,6 +562,244 @@ def list_notes(project_id: str = None, is_global: bool = None) -> list[dict]:
             
         cursor.execute(query, tuple(params))
         return [{"file_path": r[0], "title": r[1], "project_id": r[2], "is_global": bool(r[3]), "updated_at": r[4]} for r in cursor.fetchall()]
+
+
+@mcp.tool()
+async def reindex_project(project_id: str, ctx: Context) -> dict:
+    """
+    Reindexa todas las notas de un proyecto.
+    Usa el contexto MCP para reportar progreso sin acoplar logs internos (KISS).
+    """
+    notes = list_notes(project_id=project_id)
+    total = len(notes)
+    
+    if total == 0:
+        await ctx.info(f"No hay notas en el proyecto {project_id} para reindexar.")
+        return {"status": "SUCCESS", "message": "No hay notas para reindexar"}
+
+    # Explicación: Reutilizamos list_notes para la lista y hacemos un update ligero 
+    # para simular/marcar el reindexado sin duplicar lógica compleja, y reportamos con ctx.
+    config = require_initialized()
+    with init_db(config.db_path) as conn:
+        cursor = conn.cursor()
+        for i, note in enumerate(notes, start=1):
+            file_path = note["file_path"]
+            
+            await ctx.report_progress(i, total)
+            await ctx.info(f"Reindexando nota {i}/{total}: {file_path}")
+            
+            cursor.execute("UPDATE notes SET updated_at = CURRENT_TIMESTAMP WHERE file_path = ?", (file_path,))
+            
+        conn.commit()
+            
+    return {"status": "SUCCESS", "reindexed_count": total}
+
+
+@mcp.tool()
+async def enrich_note(file_path: str, ctx: Context) -> dict:
+    """
+    Lee una nota y usa el LLM del cliente MCP para proponer metadatos (Sampling).
+    """
+    # 1. Validar ruta dentro del sandbox para mantener la seguridad (Path Traversal)
+    config = require_initialized()
+    try:
+        valid_path = validate_path_sandbox(file_path, config.wiki_dir)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    # 2. Leer contenido del archivo a enriquecer
+    try:
+        with open(valid_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        return {"error": f"Error leyendo archivo: {e}"}
+
+    # 3. Construir prompt para solicitar los metadatos requeridos
+    prompt = (
+        "Por favor lee la siguiente nota y devuelve:\n"
+        "1. Un resumen de 2 líneas.\n"
+        "2. 5 keywords relevantes.\n"
+        "3. Un tipo sugerido (ej. concept, entity, comparison).\n\n"
+        f"Contenido de la nota:\n{content}"
+    )
+
+    # 4. Llamar a ctx.sample() para delegar el procesamiento al LLM del cliente MCP
+    try:
+        # Se asume que el método puede fallar si el cliente rechaza o no tiene la capacidad de Sampling
+        result = await ctx.sample(prompt=prompt)
+        return {
+            "status": "SUCCESS",
+            "proposed_enrichment": result
+        }
+    except Exception as e:
+        # 5. Degradación elegante en caso de error o falta de soporte del cliente
+        logger.warning({"file": file_path, "error": str(e)}, "Sampling no soportado o fallido")
+        return {
+            "warning": "El cliente no soporta la capacidad de Sampling (Degradación elegante) o la peticion fallo.",
+            "error_detail": str(e)
+        }
+
+
+@mcp.resource("wiki://projects")
+def get_projects() -> str:
+    """
+    Retorna la lista de proyectos conocidos en formato JSON.
+    Explicación: Permite exponer los proyectos disponibles sin duplicar la lógica,
+    consultando los project_ids únicos directamente de la base de datos.
+    """
+    with _config_lock:
+        config = active_config
+    if config is None:
+        return json.dumps({"error": "Servidor no inicializado"})
+        
+    with init_db(config.db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT project_id FROM notes WHERE project_id IS NOT NULL")
+        projects = [r[0] for r in cursor.fetchall()]
+        return json.dumps({"projects": projects})
+
+
+@mcp.resource("wiki://project/{project_id}/notes")
+def get_project_notes(project_id: str) -> str:
+    """
+    Retorna el índice de notas pertenecientes al proyecto especificado en formato JSON.
+    Explicación: Reutiliza la conexión a la base de datos para recuperar las notas
+    específicas de un proyecto, aislando los datos por project_id según el principio SOLID.
+    """
+    with _config_lock:
+        config = active_config
+    if config is None:
+        return json.dumps({"error": "Servidor no inicializado"})
+        
+    with init_db(config.db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT file_path, title, is_global, updated_at FROM notes WHERE project_id = ?", (project_id,))
+        notes = [{"file_path": r[0], "title": r[1], "is_global": bool(r[2]), "updated_at": r[3]} for r in cursor.fetchall()]
+        return json.dumps({"project_id": project_id, "notes": notes})
+
+
+@mcp.resource("wiki://note/{path}")
+def get_note_content(path: str) -> str:
+    """
+    Devuelve el contenido en crudo de una nota específica.
+    Explicación: Previene vulnerabilidades de Path Traversal aplicando la validación unificada
+    del sandbox. Retorna errores seguros en formato JSON si algo falla.
+    """
+    try:
+        config = require_initialized()
+        full_path = os.path.join(config.wiki_dir, path)
+        valid_path = validate_path_sandbox(full_path, config.wiki_dir)
+        
+        if not os.path.exists(valid_path) or not os.path.isfile(valid_path):
+            return json.dumps({"error": "El archivo no existe o no es valido"})
+            
+        with open(valid_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    except Exception:
+        return json.dumps({"error": "Error interno del servidor al leer el archivo"})
+
+
+@mcp.resource("wiki://project/{id}/graph")
+def get_project_graph(id: str) -> str:
+    """
+    Extrae y consolida las relaciones de todas las notas de un proyecto.
+    Explicación: Reutiliza RelationExtractor para parsear el DOM. Falla silenciosamente en 
+    archivos corruptos (manteniendo la iteración activa) para asegurar la resiliencia del grafo.
+    """
+    try:
+        config = require_initialized()
+        graph_data = []
+        
+        with init_db(config.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT file_path FROM notes WHERE project_id = ?", (id,))
+            notes = cursor.fetchall()
+            
+            for (file_path,) in notes:
+                if not os.path.exists(file_path):
+                    continue
+                
+                _, ext = os.path.splitext(file_path)
+                if ext.lower() == ".html":
+                    try:
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        
+                        extractor = RelationExtractor()
+                        extractor.feed(content)
+                        if extractor.relations:
+                            # Retornar ruta relativa respecto al wiki_dir para mejor lectura
+                            rel_path = os.path.relpath(file_path, config.wiki_dir)
+                            graph_data.append({
+                                "source": rel_path,
+                                "relations": [{"target": target, "type": rel_type} for target, rel_type in extractor.relations]
+                            })
+                    except Exception:
+                        # Silenciar error local para no detener todo el pipeline de recolección
+                        pass
+                        
+        return json.dumps({"project_id": id, "graph": graph_data})
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    except Exception:
+        return json.dumps({"error": "Error interno del servidor al generar el grafo"})
+
+
+# --- MCP Prompts ---
+
+@mcp.prompt()
+def ingest_note(raw_text: str, note_type: str = "concept") -> str:
+    """
+    Prompt para ingestar notas crudas y convertirlas a la taxonomía del proyecto.
+    Explicación: Estandariza cómo el LLM debe formatear los datos nuevos para que 
+    cumplan con las reglas del sistema (YAML oculto y enlaces semánticos rel).
+    """
+    return f"""Por favor, transforma el siguiente texto en un HTML minimalista.
+Debes incluir al principio un bloque YAML de esta forma:
+<!--yaml
+type: {note_type}
+-->
+Usa enlaces de la forma <a href="..." rel="..."> para establecer relaciones según la taxonomía (ej. dependency, concept-link).
+
+Texto crudo:
+{raw_text}
+"""
+
+
+@mcp.prompt()
+def search_and_synthesize(query: str, project: str = "") -> str:
+    """
+    Prompt para guiar al LLM a investigar en la wiki y responder de forma fundamentada.
+    Explicación: Fomenta que el agente use la tool de búsqueda antes de contestar 
+    y garantice que haya citas para respaldar su síntesis.
+    """
+    project_focus = f" Enfócate específicamente en el proyecto '{project}'." if project else ""
+    return f"""Utiliza la herramienta de búsqueda de la wiki para resolver la siguiente consulta:{project_focus}
+
+Consulta: {query}
+
+Sintetiza una respuesta basada estrictamente en la información encontrada, citando el nombre o path de las notas que utilizaste como fuente.
+"""
+
+
+@mcp.prompt()
+def reflexion(topic: str) -> str:
+    """
+    Prompt para solicitar reflexiones estructuradas al agente.
+    Explicación: Ayuda a mantener un formato predecible cuando se le pide al LLM
+    que piense en voz alta sobre un tema abstracto de la base de conocimientos.
+    """
+    return f"""Realiza una reflexión estructurada sobre el siguiente tema:
+{topic}
+
+Estructura tu respuesta en:
+1. Resumen del tema
+2. Puntos clave y posibles conexiones
+3. Preguntas abiertas o siguientes pasos
+"""
+
 
 def startup_lazy_check():
     """

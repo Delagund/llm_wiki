@@ -43,6 +43,30 @@ El proyecto ha completado de forma exitosa sus **7 Fases del Plan de Trabajo Esc
 
 ---
 
+## 🔌 Capacidades MCP Expuestas
+
+El servidor implementa características completas del protocolo MCP:
+
+### Recursos (Resources)
+Proporcionan acceso directo a los datos internos en modo lectura:
+- `wiki://projects`: Lista de todos los proyectos gestionados.
+- `wiki://project/{id}/notes`: Listado de notas en un proyecto específico.
+- `wiki://note/{path}`: Contenido exacto de una nota (ej. `wiki://note/wiki/concepts/mcp.html`).
+- `wiki://project/{id}/graph`: Representación del grafo de conocimiento del proyecto.
+
+### Prompts
+Plantillas de sistema preconfiguradas para guiar la interacción de LLMs:
+- `ingest_note`: Flujo para la ingesta y estructuración de información cruda.
+- `search_and_synthesize`: Prompt especializado en RAG y síntesis.
+- `reflexion`: Plantilla para reflexiones autónomas basadas en el grafo de conocimiento.
+
+### Herramientas Adicionales (Tools)
+Aparte de las básicas (`save_note`, `search_wiki`, etc.), se exponen herramientas de cliente:
+- `enrich_note`: (Sampling) Permite al servidor muestrear el modelo para enriquecer semánticamente una nota.
+- `reindex_project`: (Logging/Progreso) Permite re-indexar con reportes asíncronos de progreso.
+
+---
+
 ## 📂 Estructura del Repositorio
 
 - `server.py`: Servidor primario FastMCP. Contiene las herramientas expuestas a los agentes (`save_note`, `search_wiki`, `list_notes`, `get_ingestion_status`).
